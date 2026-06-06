@@ -1,1 +1,4 @@
-pip install pyrogram pyromod pytz tgcrypto
+pyrogram
+pyromod
+pytz
+tgcrypto
