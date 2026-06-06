@@ -1,5 +1,4 @@
-pyrogram
-tgcrypto
-pyro-listener
-pytz
-asyncio
+pyrogram==2.0.106
+TgCrypto==1.2.5
+pyro-listener==1.0.3
+pytz==2024.1
