@@ -1,4 +1,3 @@
-pyrogram
-pyromod
+pyrogram>=2.0.0
 pytz
-tgcrypto
+pyro-listener
