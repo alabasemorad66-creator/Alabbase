@@ -1,5 +1,1 @@
-pyrogram
-tgcrypto
-pyromod
-pytz
-asyncio
+pip install pyrogram pyromod pytz tgcrypto
