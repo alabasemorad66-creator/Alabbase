@@ -27,16 +27,18 @@ from pytz import timezone
 from typing import Union
 import json, os
 
-
 app = Client(
     "autoPost",
     api_id="34923196",
     api_hash="b3f6e47ecd3231186f8f7e01ab41938e",
-    bot_token = '8091669494:AAFgMcJKNweaLjkpotwgBPpCLSpwJqs4BsA'
+    bot_token='8091669494:AAFgMcJKNweaLjkpotwgBPpCLSpwJqs4BsA'
 )
 loop = get_event_loop()
-listener = Listener(client = app)
+listener = Listener(client=app)
 owner = 8310839908
+
+# قاموس لتتبع مهام النشر النشطة لكل مستخدم
+active_tasks = {}
 
 # ------------------- أزرار الصفحة الرئيسية -------------------
 homeMarkup = Markup([
@@ -186,18 +188,15 @@ async def newSuper(_: Client, callback: CallbackQuery):
     # إذا كان النص يبدأ بـ "-100" أو رقم سالب (معرف)
     if input_text.startswith("-") and input_text.lstrip("-").isdigit():
         group_id = int(input_text)
-        invite_link = None  # لا نملك رابطاً
+        invite_link = None
     elif "t.me/" in input_text or "telegram.me/" in input_text:
-        # استخراج الرابط
         invite_link = input_text
         try:
-            # محاولة جلب الدردشة بواسطة البوت
             chat = await app.get_chat(invite_link.split("/")[-1])
             group_id = chat.id
         except Exception as e:
             return await ask.reply("- لم يتم ايجاد السوبر. تأكد من الرابط.", reply_to_message_id=ask.id, reply_markup=reMarkup)
     else:
-        # قد يكون معرفاً رقمياً بدون علامة ناقص (نادر)
         try:
             group_id = int(input_text)
             invite_link = None
@@ -207,13 +206,18 @@ async def newSuper(_: Client, callback: CallbackQuery):
     if group_id is None:
         return await ask.reply("- لم يتم التعرف على المجموعة.", reply_to_message_id=ask.id, reply_markup=reMarkup)
     
-    # تخزين المجموعة كـ كائن يحتوي على id و link
+    # تخزين المجموعة مع التحقق من عدم التكرار
     if users[str(user_id)].get("groups") is None:
         users[str(user_id)]["groups"] = []
     
+    groups_data = users[str(user_id)]["groups"]
+    # منع إضافة نفس group_id مرتين
+    if any(g["id"] == group_id for g in groups_data):
+        return await ask.reply("- هذا السوبر مضاف بالفعل إلى قائمتك.", reply_to_message_id=ask.id, reply_markup=reMarkup)
+    
     users[str(user_id)]["groups"].append({
         "id": group_id,
-        "link": invite_link   # قد يكون None
+        "link": invite_link
     })
     write(users_db, users)
     await ask.reply("- تمت اضافة هذا السوبر الى القائمه.", reply_markup=Markup([[Button("- الصفحه الرئيسيه -", callback_data="toHome")]]), reply_to_message_id=ask.id)
@@ -313,9 +317,15 @@ async def startPosting(_: Client, callback: CallbackQuery):
         return await callback.answer("- لم يتم اضافة اي سوبرات بعد.", show_alert=True)
     if users[str(user_id)].get("posting"):
         return await callback.answer("النشر التلقائي مفعل من قبل.", show_alert=True)
+    
+    # التحقق من وجود مهمة نشطة لنفس المستخدم
+    if str(user_id) in active_tasks and not active_tasks[str(user_id)].done():
+        return await callback.answer("يوجد مهمة نشر نشطة بالفعل، انتظر قليلاً.", show_alert=True)
+    
     users[str(user_id)]["posting"] = True
     write(users_db, users)
-    create_task(posting(user_id))
+    task = create_task(posting(user_id))
+    active_tasks[str(user_id)] = task
     markup = Markup([[Button("- إيقاف النشر -", callback_data="stopPosting"), Button("- عوده -", callback_data="toHome")]])
     await callback.message.edit_text("- بدأت عملية النشر التلقائي", reply_markup=markup)
 
@@ -333,70 +343,79 @@ async def stopPosting(_: Client, callback: CallbackQuery):
 
 # =================== دالة النشر المعدلة بالكامل ===================
 async def posting(user_id):
-    # بدء العميل إذا كانت حالة النشر مفعلة
-    if not users[str(user_id)].get("posting"):
-        return
-    client = Client(str(user_id), api_id=app.api_id, api_hash=app.api_hash, session_string=users[str(user_id)]["session"])
-    await client.start()
-    
-    while users[str(user_id)].get("posting"):
-        sleepTime = users[str(user_id)].get("waitTime", 60)
-        groups_data = users[str(user_id)].get("groups", [])
-        caption = users[str(user_id)].get("caption")
-        if not caption:
+    try:
+        # التحقق مرة أخرى من حالة النشر
+        if not users[str(user_id)].get("posting"):
+            return
+        
+        client = Client(str(user_id), api_id=app.api_id, api_hash=app.api_hash, session_string=users[str(user_id)]["session"])
+        await client.start()
+        
+        while users[str(user_id)].get("posting"):
+            sleepTime = users[str(user_id)].get("waitTime", 60)
+            groups_data = users[str(user_id)].get("groups", [])
+            caption = users[str(user_id)].get("caption")
+            if not caption:
+                users[str(user_id)]["posting"] = False
+                write(users_db, users)
+                await app.send_message(int(user_id), "- تم إيقاف النشر بسبب عدم اضافة كليشة.",
+                                       reply_markup=Markup([[Button("- إضافة كليشه -", callback_data="newCaption")]]))
+                break
+            
+            # نسخ القائمة لتجنب التغيير أثناء التكرار
+            for group_obj in list(groups_data):
+                # التحقق مرة أخرى من حالة النشر قبل كل إرسال
+                if not users[str(user_id)].get("posting"):
+                    break
+                group_id = group_obj["id"]
+                invite_link = group_obj.get("link")
+                try:
+                    await client.send_message(group_id, caption)
+                except (ChatWriteForbidden, PeerIdInvalid, UserNotParticipant) as e:
+                    # محاولة الانضمام ثم الإرسال
+                    success = False
+                    if invite_link:
+                        try:
+                            await client.join_chat(invite_link)
+                            await client.send_message(group_id, caption)
+                            success = True
+                        except Exception as join_err:
+                            await app.send_message(int(user_id), f"⚠️ فشل الانضمام عبر الرابط {invite_link}: {join_err}")
+                    if not success:
+                        try:
+                            await client.join_chat(group_id)
+                            await client.send_message(group_id, caption)
+                            success = True
+                        except Exception as join_err2:
+                            try:
+                                chat = await app.get_chat(group_id)
+                                if chat.invite_link:
+                                    await client.join_chat(chat.invite_link)
+                                    await client.send_message(group_id, caption)
+                                    # تحديث الرابط المخزن
+                                    for idx, g in enumerate(users[str(user_id)]["groups"]):
+                                        if g["id"] == group_id:
+                                            users[str(user_id)]["groups"][idx]["link"] = chat.invite_link
+                                            write(users_db, users)
+                                    success = True
+                            except Exception:
+                                pass
+                    if not success:
+                        await app.send_message(int(user_id), f"❌ تعذر الإرسال للمجموعة {group_id} بعد محاولات الانضمام.")
+                except Exception as e:
+                    await app.send_message(int(user_id), f"❌ خطأ غير متوقع للمجموعة {group_id}: {e}")
+            await sleep(sleepTime)
+        
+        await client.stop()
+    finally:
+        # إزالة المهمة من القاموس النشط عند الانتهاء (سواء طبيعياً أو بسبب خطأ)
+        if str(user_id) in active_tasks:
+            del active_tasks[str(user_id)]
+        # التأكد من أن حالة النشر أصبحت False
+        if str(user_id) in users and users[str(user_id)].get("posting"):
             users[str(user_id)]["posting"] = False
             write(users_db, users)
-            await app.send_message(int(user_id), "- تم إيقاف النشر بسبب عدم اضافة كليشة.",
-                                   reply_markup=Markup([[Button("- إضافة كليشه -", callback_data="newCaption")]]))
-            break
-        
-        # نسخة من القائمة للتكرار
-        for group_obj in list(groups_data):
-            group_id = group_obj["id"]
-            invite_link = group_obj.get("link")
-            try:
-                # محاولة الإرسال مباشرة
-                await client.send_message(group_id, caption)
-            except (ChatWriteForbidden, PeerIdInvalid, UserNotParticipant) as e:
-                # الحساب ليس عضواً أو المعرف غير صالح -> نحاول الانضمام
-                success = False
-                # استراتيجية الانضمام: أولاً باستخدام الرابط إن وجد، ثم باستخدام المعرف
-                if invite_link:
-                    try:
-                        await client.join_chat(invite_link)
-                        await client.send_message(group_id, caption)
-                        success = True
-                    except Exception as join_err:
-                        await app.send_message(int(user_id), f"⚠️ فشل الانضمام عبر الرابط {invite_link}: {join_err}")
-                if not success:
-                    # محاولة الانضمام باستخدام المعرف (قد يعمل إذا كان الحساب يعرف المجموعة)
-                    try:
-                        await client.join_chat(group_id)
-                        await client.send_message(group_id, caption)
-                        success = True
-                    except Exception as join_err2:
-                        # إذا فشل، نحاول استرداد الرابط من البوت (إذا كان البوت عضواً)
-                        try:
-                            chat = await app.get_chat(group_id)
-                            if chat.invite_link:
-                                await client.join_chat(chat.invite_link)
-                                await client.send_message(group_id, caption)
-                                # تحديث الرابط المخزن
-                                for idx, g in enumerate(users[str(user_id)]["groups"]):
-                                    if g["id"] == group_id:
-                                        users[str(user_id)]["groups"][idx]["link"] = chat.invite_link
-                                        write(users_db, users)
-                                success = True
-                        except Exception:
-                            pass
-                if not success:
-                    await app.send_message(int(user_id), f"❌ تعذر الإرسال للمجموعة {group_id} بعد محاولات الانضمام. قد تحتاج لإضافة الرابط يدوياً.")
-            except Exception as e:
-                # أي خطأ آخر غير متوقع
-                await app.send_message(int(user_id), f"❌ خطأ غير متوقع للمجموعة {group_id}: {e}")
-        await sleep(sleepTime)
-    
-    await client.stop()
+
 # =================== نهاية دالة النشر ===================
 
 # ------------------- قسم المالك -------------------
@@ -523,7 +542,7 @@ async def removeChannel(_: Client, callback: CallbackQuery):
     markup.extend([[Button("- إضافة قناه جديده -", callback_data="addChannel")], [Button("- الصفحه الرئيسيه -", callback_data="toAdmin")]])
     await callback.message.edit_text(caption, reply_markup=Markup(markup))
 
-@app.on_callback_query(filters.regex(f"^(statics)$") & isOwner)
+@app.on_callback_query(filters.regex(r"^(statics)$") & isOwner)
 async def statics(_: Client, callback: CallbackQuery):
     total = len(users)
     vip = sum(1 for u in users.values() if u.get("vip"))
@@ -588,6 +607,29 @@ def read(fp):
     with open(fp) as file:
         return json.load(file)
 
+# دالة لتنظيف البيانات من التكرارات في السوبرات
+def clean_duplicate_groups():
+    cleaned = 0
+    for user_id, data in users.items():
+        if "groups" in data and isinstance(data["groups"], list):
+            unique = []
+            seen_ids = set()
+            for g in data["groups"]:
+                if isinstance(g, dict) and "id" in g:
+                    if g["id"] not in seen_ids:
+                        seen_ids.add(g["id"])
+                        unique.append(g)
+                    else:
+                        cleaned += 1
+                else:
+                    # تجاهل العناصر غير الصالحة
+                    cleaned += 1
+            if len(unique) != len(data["groups"]):
+                data["groups"] = unique
+    if cleaned > 0:
+        write(users_db, users)
+        print(f"Cleaned {cleaned} duplicate group entries from database.")
+
 users_db = "users.json"
 channels_db = "channels.json"
 users = read(users_db)
@@ -597,7 +639,11 @@ async def reStartPosting():
     await sleep(30)
     for user in users:
         if users[user].get("posting"):
-            create_task(posting(int(user)))
+            # تأكد من عدم وجود مهمة نشطة بالفعل لهذا المستخدم
+            if str(user) in active_tasks and not active_tasks[str(user)].done():
+                continue
+            task = create_task(posting(int(user)))
+            active_tasks[str(user)] = task
 
 async def reVipTime():
     for user in users:
@@ -607,6 +653,8 @@ async def reVipTime():
             create_task(vipCanceler(int(user)))
 
 async def main():
+    # تنظيف البيانات من التكرارات
+    clean_duplicate_groups()
     create_task(reStartPosting())
     create_task(reVipTime())
     await app.start()
