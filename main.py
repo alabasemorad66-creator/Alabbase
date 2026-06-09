@@ -16,7 +16,7 @@ import re
 # =================== إعدادات البوت ===================
 API_ID = 34923196
 API_HASH = "b3f6e47ecd3231186f8f7e01ab41938e"
-BOT_TOKEN = "8860124031:AAE2LpN2aoz9wTDtKEx_B9KtBgrSHWtfTrY"
+BOT_TOKEN = "8228434919:AAFTVBCrhCvpgsnnoex-JDt_U-NEk2dfnUU"
 OWNER_ID = 8310839908
 
 app = Client("auto_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
