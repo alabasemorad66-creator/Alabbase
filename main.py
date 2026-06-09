@@ -29,9 +29,9 @@ import json, random
 # =================== إعدادات البوت ===================
 app = Client(
     "autoPost",
-    api_id="34923166",
+    api_id="34923196",
     api_hash="b3f6e47ecd3231186f8f7e01ab41938e",
-    bot_token='8860124031:AAE2LpN2aoz9wTDtKEx_B9KtBgrSHWtfTrY'
+    bot_token='8091669494:AAFgMcJKNweaLjkpotwgBPpCLSpwJqs4BsA''
 )
 loop = get_event_loop()
 listener = Listener(client=app)
