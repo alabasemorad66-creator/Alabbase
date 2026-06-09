@@ -24,12 +24,12 @@ from asyncio import create_task, sleep, get_event_loop
 from datetime import datetime, timedelta
 from pytz import timezone
 from typing import Union
-import json, random, re
+import json, random
 
 # =================== إعدادات البوت ===================
 app = Client(
     "autoPost",
-    api_id="34923196",
+    api_id="34923166",
     api_hash="b3f6e47ecd3231186f8f7e01ab41938e",
     bot_token='8860124031:AAE2LpN2aoz9wTDtKEx_B9KtBgrSHWtfTrY'
 )
@@ -42,9 +42,9 @@ _timezone = timezone("Asia/Baghdad")
 def get_home_markup(user_id):
     user_data = users.get(str(user_id), {})
     delete_after = user_data.get("delete_after", 0)
-    delete_text = f"🗑 حذف بعد {delete_after} ثانية" if delete_after > 0 else "🗑 حذف معطل"
+    delete_text = f"🗑 حذف بعد {delete_after} ث" if delete_after > 0 else "🗑 حذف معطل"
+    smart_delay_text = "✅ توزيع ذكي" if user_data.get("smart_delay", True) else "❌ توزيع عادي"
     
-    # إحصاءات سريعة
     accounts_count = len(user_data.get("accounts", []))
     groups_count = len(user_data.get("groups", []))
     captions_count = len(user_data.get("captions", []))
@@ -52,10 +52,11 @@ def get_home_markup(user_id):
     return Markup([
         [Button(f"👤 حسابي ({accounts_count})", callback_data="account")],
         [Button(f"📁 الجروبات ({groups_count})", callback_data="currentSupers"), Button(f"➕ إضافة جروب", callback_data="newSuper")],
-        [Button(f"📝 الكليشات ({captions_count})", callback_data="manageCaptions"), Button(f"➕ إضافة كليشه", callback_data="addCaptionQuick")],
+        [Button(f"📝 الكليشات ({captions_count})", callback_data="manageCaptions")],
+        [Button(smart_delay_text, callback_data="toggleSmartDelay")],
+        [Button(f"⏱ المدة الإجمالية: {user_data.get('cycle_time', 60)}ث", callback_data="setCycleTime")],
         [Button(delete_text, callback_data="setDeleteAfter")],
-        [Button(f"⏱ تعيين المدة", callback_data="waitTime")],
-        [Button("▶️ بدء النشر", callback_data="startPosting"), Button("⏹ إيقاف النشر", callback_data="stopPosting")],
+        [Button("▶️ بدء النشر", callback_data="startPosting"), Button("⏹ إيقاف", callback_data="stopPosting")],
         [Button("📊 الحالة", callback_data="status")]
     ])
 
@@ -106,6 +107,36 @@ async def delete_message_after_delay(client, chat_id, message_id, delay_seconds)
     except:
         pass
 
+def calculate_delays(num_groups: int, cycle_time: int) -> list:
+    """
+    حساب الفواصل الزمنية بين الجروبات
+    المبدأ: المدة الإجمالية / عدد الجروبات = متوسط الفاصل
+    مع إضافة عشوائية لتجنب النمطية
+    """
+    if num_groups <= 1:
+        return []
+    
+    # متوسط الفاصل بين كل جروب وآخر
+    avg_interval = cycle_time / num_groups
+    
+    delays = []
+    remaining_time = cycle_time
+    
+    for i in range(num_groups - 1):
+        # عشوائية بين -30% و +30% من متوسط الفاصل
+        variation = random.uniform(-0.3, 0.3) * avg_interval
+        delay = max(2, avg_interval + variation)  # لا تقل عن 2 ثانية
+        
+        if i == num_groups - 2:
+            # آخر فاصل - نضبطه ليتناسب مع الوقت المتبقي
+            delay = max(2, remaining_time)
+        else:
+            remaining_time -= delay
+        
+        delays.append(delay)
+    
+    return delays
+
 # =================== أوامر المستخدم ===================
 @app.on_message(filters.command("start") & filters.private)
 async def start(_: Client, message: Message):
@@ -126,7 +157,8 @@ async def start(_: Client, message: Message):
             "active_account": None,
             "groups": [],
             "captions": [],
-            "waitTime": 60,
+            "cycle_time": 60,  # المدة الإجمالية للدورة بالثواني
+            "smart_delay": True,  # تفعيل التوزيع الذكي
             "delete_after": 0,
             "posting": False
         }
@@ -137,39 +169,120 @@ async def start(_: Client, message: Message):
     
     await message.reply(
         f"✨ **مرحباً {message.from_user.first_name}** ✨\n\n"
-        f"📌 **البوت جاهز للعمل**\n"
-        f"🔹 استخدم الأزرار أدناه للتحكم\n\n"
+        f"📌 **كيف يعمل التوزيع الذكي؟**\n"
+        f"🔹 إذا حددت مدة إجمالية 200 ثانية\n"
+        f"🔹 ولديك 10 جروبات\n"
+        f"🔹 فسيتم التوزيع كالتالي:\n"
+        f"   • 200 ÷ 10 = 20 ثانية متوسط بين كل جروب\n"
+        f"   • مع إضافة عشوائية ±30% لتجنب النمطية\n"
+        f"   • ترتيب الجروبات عشوائي\n"
+        f"   • كليشات عشوائية لكل إرسال\n\n"
         f"📖 **الخطوات:**\n"
         f"1️⃣ أضف حساباً عبر 'حسابي'\n"
         f"2️⃣ أضف الجروبات عبر 'إضافة جروب'\n"
         f"3️⃣ أضف كليشات عبر 'الكليشات'\n"
-        f"4️⃣ اضغط 'بدء النشر'",
+        f"4️⃣ اضبط المدة الإجمالية\n"
+        f"5️⃣ اضغط 'بدء النشر'",
         reply_markup=get_home_markup(user_id)
     )
 
 @app.on_callback_query(filters.regex(r"^(toHome)$"))
 async def toHome(_: Client, callback: CallbackQuery):
     await callback.message.edit_text(
-        "🏠 **القائمة الرئيسية**",
+        "🏠 **القائمة الرئيسية**\n\n"
+        "📌 التوزيع الذكي: المدة الإجمالية تقسم على عدد الجروبات",
         reply_markup=get_home_markup(callback.from_user.id)
     )
+
+@app.on_callback_query(filters.regex(r"^(toggleSmartDelay)$"))
+async def toggleSmartDelay(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    current = users[str(user_id)].get("smart_delay", True)
+    users[str(user_id)]["smart_delay"] = not current
+    write(users_db, users)
+    
+    status = "مفعل ✅" if not current else "معطل ❌"
+    await callback.answer(f"تم {status} التوزيع الذكي", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=get_home_markup(user_id))
+
+@app.on_callback_query(filters.regex(r"^(setCycleTime)$"))
+async def setCycleTime(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.delete()
+    
+    try:
+        ask = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="⏱ **تعيين المدة الإجمالية للدورة**\n\n"
+                 "🔹 **كيف يعمل؟**\n"
+                 "المدة الإجمالية ÷ عدد الجروبات = الفاصل بين كل جروب\n\n"
+                 "مثال: 200 ثانية ÷ 10 جروبات = 20 ثانية بين كل إرسال\n\n"
+                 "📝 **أرسل المدة بالثواني:**\n"
+                 "(الحد الأدنى: 30 ثانية)\n\n"
+                 "أو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=60
+        )
+    except exceptions.TimeOut:
+        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    if ask.text == "/cancel":
+        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    try:
+        cycle_time = int(ask.text)
+        if cycle_time < 30:
+            return await ask.reply("⚠️ المدة يجب أن تكون 30 ثانية على الأقل", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+        
+        users[str(user_id)]["cycle_time"] = cycle_time
+        write(users_db, users)
+        
+        # شرح للمستخدم كيف سيتم التوزيع
+        groups_count = len(users[str(user_id)].get("groups", []))
+        if groups_count > 0:
+            avg_delay = cycle_time / groups_count
+            await ask.reply(
+                f"✅ **تم تعيين المدة الإجمالية إلى {cycle_time} ثانية**\n\n"
+                f"📊 **حسب الوضع الحالي:**\n"
+                f"• عدد الجروبات: {groups_count}\n"
+                f"• متوسط الفاصل بين الجروبات: {avg_delay:.1f} ثانية\n"
+                f"• مع عشوائية ±30% لتجنب النمطية\n"
+                f"• ترتيب الجروبات عشوائي\n"
+                f"• كليشات عشوائية لكل إرسال",
+                reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]])
+            )
+        else:
+            await ask.reply(f"✅ **تم تعيين المدة الإجمالية إلى {cycle_time} ثانية**\n\n⚠️ أضف جروبات أولاً لتفعيل التوزيع الذكي",
+                          reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    except:
+        await ask.reply("❌ رقم غير صالح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
 
 @app.on_callback_query(filters.regex(r"^(status)$"))
 async def show_status(_: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
     data = users.get(str(user_id), {})
+    groups_count = len(data.get('groups', []))
+    cycle_time = data.get('cycle_time', 60)
+    avg_delay = cycle_time / groups_count if groups_count > 0 else 0
     
     status_text = f"📊 **حالة البوت**\n\n"
     status_text += f"👤 **الحسابات:** {len(data.get('accounts', []))}\n"
     if data.get('active_account') is not None:
         accounts = data.get('accounts', [])
         if data['active_account'] < len(accounts):
-            status_text += f"   ✅ الحساب النشط: {accounts[data['active_account']].get('phone', 'غير معروف')}\n"
-    status_text += f"📁 **الجروبات:** {len(data.get('groups', []))}\n"
-    status_text += f"📝 **الكليشات:** {len(data.get('captions', []))}\n"
-    status_text += f"⏱ **المدة بين الرسائل:** {data.get('waitTime', 60)} ثانية\n"
+            status_text += f"   ✅ النشط: {accounts[data['active_account']].get('phone', 'غير معروف')}\n"
+    status_text += f"📁 **الجروبات:** {groups_count}\n"
+    status_text += f"📝 **الكليشات:** {len(data.get('captions', []))}\n\n"
+    status_text += f"⏱ **المدة الإجمالية:** {cycle_time} ثانية\n"
+    status_text += f"📊 **متوسط الفاصل:** {avg_delay:.1f} ثانية\n"
+    status_text += f"🔄 **توزيع ذكي:** {'✅ مفعل' if data.get('smart_delay', True) else '❌ معطل'}\n"
     status_text += f"🗑 **حذف تلقائي:** {data.get('delete_after', 0)} ثانية\n"
-    status_text += f"🔄 **حالة النشر:** {'🟢 يعمل' if data.get('posting') else '🔴 متوقف'}\n"
+    status_text += f"▶️ **حالة النشر:** {'🟢 يعمل' if data.get('posting') else '🔴 متوقف'}\n\n"
+    status_text += f"📌 **آلية التوزيع:**\n"
+    status_text += f"• المدة الإجمالية ÷ عدد الجروبات = الفاصل\n"
+    status_text += f"• ترتيب عشوائي للجروبات\n"
+    status_text += f"• كليشات عشوائية لكل إرسال\n"
+    status_text += f"• عشوائية ±30% على الفواصل"
     
     await callback.message.edit_text(status_text, reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
 
@@ -310,7 +423,6 @@ async def deleteAccount(_: Client, callback: CallbackQuery):
         removed = accounts.pop(idx)
         users[str(user_id)]["accounts"] = accounts
         
-        # تعديل المؤشر النشط
         active = users[str(user_id)].get("active_account")
         if active == idx:
             users[str(user_id)]["active_account"] = None if len(accounts) == 0 else 0
@@ -350,13 +462,11 @@ async def newSuper(_: Client, callback: CallbackQuery):
     invite_link = None
     input_text = ask.text.strip()
     
-    # استخراج المعرف
     if input_text.startswith("-") and input_text.lstrip("-").isdigit():
         group_id = int(input_text)
     elif "t.me/" in input_text:
         invite_link = input_text
         try:
-            # استخراج اسم المستخدم من الرابط
             parts = input_text.split("/")
             username = parts[-1]
             chat = await app.get_chat(username)
@@ -366,18 +476,15 @@ async def newSuper(_: Client, callback: CallbackQuery):
     else:
         return await ask.reply("❌ المعرف أو الرابط غير صالح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
     
-    # حفظ المجموعة
     groups = users[str(user_id)].get("groups", [])
     
-    # التحقق من عدم التكرار
     for g in groups:
         if g["id"] == group_id:
             return await ask.reply("⚠️ هذه المجموعة مضافة بالفعل", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
     
     groups.append({
         "id": group_id,
-        "link": invite_link,
-        "name": None  # سيتم تحديثه لاحقاً
+        "link": invite_link
     })
     users[str(user_id)]["groups"] = groups
     write(users_db, users)
@@ -446,10 +553,6 @@ async def addCaption(_: Client, callback: CallbackQuery):
     await ask.reply(f"✅ **تم إضافة الكليشة #{len(captions)}**\n\n📄 {ask.text[:100]}{'...' if len(ask.text) > 100 else ''}",
                     reply_markup=Markup([[Button("🔙 رجوع", callback_data="manageCaptions")]]))
 
-@app.on_callback_query(filters.regex(r"^(addCaptionQuick)$"))
-async def addCaptionQuick(_: Client, callback: CallbackQuery):
-    await addCaption(_, callback)
-
 @app.on_callback_query(filters.regex(r"^(viewCap_)(\d+)$"))
 async def viewCaption(_: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -478,39 +581,7 @@ async def delCaption(_: Client, callback: CallbackQuery):
     
     await manageCaptions(_, callback)
 
-# =================== الإعدادات ===================
-@app.on_callback_query(filters.regex(r"^(waitTime)$"))
-async def waitTime(_: Client, callback: CallbackQuery):
-    user_id = callback.from_user.id
-    await callback.message.delete()
-    
-    try:
-        ask = await listener.listen(
-            from_id=user_id, chat_id=user_id,
-            text="⏱ **تعيين المدة بين الرسائل**\n\n"
-                 "أرسل المدة بالثواني\n"
-                 "مثال: 60 (دقيقة واحدة)\n"
-                 "الحد الأدنى: 10 ثوانٍ\n\n"
-                 "أو ارسل /cancel للإلغاء",
-            reply_markup=ForceReply(),
-            timeout=60
-        )
-    except exceptions.TimeOut:
-        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
-    
-    if ask.text == "/cancel":
-        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
-    
-    try:
-        wait = int(ask.text)
-        if wait < 10:
-            return await ask.reply("⚠️ المدة يجب أن تكون 10 ثوانٍ على الأقل", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
-        users[str(user_id)]["waitTime"] = wait
-        write(users_db, users)
-        await ask.reply(f"✅ **تم تعيين المدة إلى {wait} ثانية**", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
-    except:
-        await ask.reply("❌ رقم غير صالح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
-
+# =================== إعدادات أخرى ===================
 @app.on_callback_query(filters.regex(r"^(setDeleteAfter)$"))
 async def setDeleteAfter(_: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -559,12 +630,12 @@ async def startPosting(_: Client, callback: CallbackQuery):
     if active_idx is None or len(user_data.get("accounts", [])) == 0:
         return await callback.answer("❌ لا يوجد حساب! أضف حساباً أولاً", show_alert=True)
     
-    # التحقق من وجود جروبات
-    if not user_data.get("groups"):
+    groups = user_data.get("groups", [])
+    if not groups:
         return await callback.answer("❌ لا توجد جروبات! أضف جروباً أولاً", show_alert=True)
     
-    # التحقق من وجود كليشات
-    if not user_data.get("captions"):
+    captions = user_data.get("captions", [])
+    if not captions:
         return await callback.answer("❌ لا توجد كليشات! أضف كليشة أولاً", show_alert=True)
     
     if user_data.get("posting"):
@@ -573,16 +644,29 @@ async def startPosting(_: Client, callback: CallbackQuery):
     if str(user_id) in active_tasks:
         return await callback.answer("⚠️ يتم التشغيل حالياً", show_alert=True)
     
-    # إظهار ملخص قبل البدء
-    accounts = user_data.get("accounts", [])
-    active_account = accounts[active_idx] if active_idx < len(accounts) else None
+    # حساب الإحصائيات
+    cycle_time = user_data.get("cycle_time", 60)
+    groups_count = len(groups)
+    avg_delay = cycle_time / groups_count
+    smart_delay = user_data.get("smart_delay", True)
     
     summary = f"🚀 **بدء النشر التلقائي**\n\n"
-    summary += f"👤 **الحساب النشط:** {active_account['phone'] if active_account else 'غير معروف'}\n"
-    summary += f"📁 **عدد الجروبات:** {len(user_data['groups'])}\n"
-    summary += f"📝 **عدد الكليشات:** {len(user_data['captions'])}\n"
-    summary += f"⏱ **المدة بين الرسائل:** {user_data['waitTime']} ثانية\n"
-    summary += f"🗑 **حذف تلقائي:** {user_data['delete_after']} ثانية\n\n"
+    summary += f"👤 **الحساب النشط:** {user_data['accounts'][active_idx]['phone']}\n"
+    summary += f"📁 **عدد الجروبات:** {groups_count}\n"
+    summary += f"📝 **عدد الكليشات:** {len(captions)}\n\n"
+    summary += f"⏱ **المدة الإجمالية للدورة:** {cycle_time} ثانية\n"
+    
+    if smart_delay and groups_count > 1:
+        summary += f"📊 **آلية التوزيع الذكي:**\n"
+        summary += f"   • متوسط الفاصل: {avg_delay:.1f} ثانية\n"
+        summary += f"   • ترتيب الجروبات: عشوائي\n"
+        summary += f"   • كليشات: عشوائية لكل إرسال\n"
+        summary += f"   • عشوائية ±30% على الفواصل\n"
+    else:
+        summary += f"📊 **آلية التوزيع العادي:**\n"
+        summary += f"   • انتظار {cycle_time} ثانية بين كل رسالة\n"
+    
+    summary += f"\n🗑 **حذف تلقائي:** {user_data.get('delete_after', 0)} ثانية\n\n"
     summary += f"✅ جارٍ البدء..."
     
     await callback.message.edit_text(summary)
@@ -593,15 +677,6 @@ async def startPosting(_: Client, callback: CallbackQuery):
     task = create_task(posting(user_id))
     active_tasks.add(str(user_id))
     task.add_done_callback(lambda t: active_tasks.discard(str(user_id)))
-    
-    await callback.message.edit_text(
-        f"✅ **تم بدء النشر التلقائي**\n\n"
-        f"📊 **الإحصائيات:**\n"
-        f"• جروبات: {len(user_data['groups'])}\n"
-        f"• كليشات: {len(user_data['captions'])}\n"
-        f"• المدة: {user_data['waitTime']} ثانية",
-        reply_markup=Markup([[Button("⏹ إيقاف النشر", callback_data="stopPosting"), Button("🔙 رجوع", callback_data="toHome")]])
-    )
 
 @app.on_callback_query(filters.regex(r"^(stopPosting)$"))
 async def stopPosting(_: Client, callback: CallbackQuery):
@@ -613,11 +688,12 @@ async def stopPosting(_: Client, callback: CallbackQuery):
     write(users_db, users)
     
     await callback.message.edit_text(
-        "⏹ **تم إيقاف النشر التلقائي**",
+        "⏹ **تم إيقاف النشر التلقائي**\n\n"
+        "يمكنك استئنافه لاحقاً من القائمة الرئيسية",
         reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]])
     )
 
-# =================== دالة النشر الرئيسية ===================
+# =================== دالة النشر الرئيسية (مع التوزيع الذكي) ===================
 async def send_to_group(client, group_id, caption, delete_after):
     """إرسال رسالة إلى مجموعة واحدة"""
     try:
@@ -670,10 +746,11 @@ async def posting(user_id):
     
     try:
         while user_data.get("posting"):
-            wait_time = user_data.get("waitTime", 60)
+            cycle_time = user_data.get("cycle_time", 60)
             groups = user_data.get("groups", []).copy()
             captions = user_data.get("captions", [])
             delete_after = user_data.get("delete_after", 0)
+            smart_delay = user_data.get("smart_delay", True)
             
             if not groups or not captions:
                 user_data["posting"] = False
@@ -681,30 +758,68 @@ async def posting(user_id):
                 await app.send_message(user_id, "⚠️ توقف النشر: لا توجد جروبات أو كليشات")
                 break
             
+            # خلط ترتيب الجروبات عشوائياً
+            shuffled_groups = groups.copy()
+            random.shuffle(shuffled_groups)
+            
+            num_groups = len(shuffled_groups)
+            
+            # حساب الفواصل الزمنية (فقط إذا كان التوزيع الذكي مفعلاً)
+            if smart_delay and num_groups > 1:
+                delays = calculate_delays(num_groups, cycle_time)
+            else:
+                # الوضع العادي: نفس المدة بين كل رسالة
+                delays = [cycle_time] * (num_groups - 1)
+            
             success_count = 0
             fail_count = 0
             
-            for group in groups:
+            # إرسال الرسائل مع الفواصل المحسوبة
+            for idx, group in enumerate(shuffled_groups):
                 if not user_data.get("posting"):
                     break
                 
                 group_id = group["id"]
+                # اختيار كليشة عشوائية
                 caption = random.choice(captions)
+                
+                # محاكاة الكتابة البشرية (تأخير قصير عشوائي)
+                await sleep(random.uniform(0.5, 2.0))
                 
                 success, error = await send_to_group(client, group_id, caption, delete_after)
                 
                 if success:
                     success_count += 1
-                    await app.send_message(user_id, f"✅ تم الإرسال إلى المجموعة {group_id}")
+                    # إرسال تقرير كل 5 رسائل ناجحة
+                    if success_count % 5 == 0:
+                        await app.send_message(user_id, f"✅ تم إرسال {success_count} رسالة بنجاح")
                 else:
                     fail_count += 1
                     if "FloodWait" not in error:
                         await app.send_message(user_id, f"❌ فشل الإرسال إلى {group_id}: {error}")
                 
-                await sleep(wait_time)
+                # انتظار الفاصل الزمني قبل الإرسال التالي (ما عدا آخر رسالة)
+                if idx < len(delays) and user_data.get("posting"):
+                    delay = delays[idx]
+                    # إضافة عشوائية إضافية صغيرة
+                    extra_jitter = random.uniform(0, 2)
+                    await sleep(delay + extra_jitter)
             
-            # إرسال تقرير الدورة
-            await app.send_message(user_id, f"📊 **تقرير الدورة:**\n✅ نجح: {success_count}\n❌ فشل: {fail_count}")
+            # إرسال تقرير الدورة الكامل
+            total_sent = success_count + fail_count
+            await app.send_message(
+                user_id, 
+                f"📊 **تقرير الدورة:**\n"
+                f"• الوقت الإجمالي: {cycle_time} ثانية\n"
+                f"• عدد الجروبات: {num_groups}\n"
+                f"• ✅ نجح: {success_count}\n"
+                f"• ❌ فشل: {fail_count}\n"
+                f"• 📈 نسبة النجاح: {success_count * 100 // total_sent if total_sent > 0 else 0}%"
+            )
+            
+            # انتظار قصير بين الدورات (اختياري، لمنع النمطية)
+            if user_data.get("posting"):
+                await sleep(random.uniform(3, 8))
             
     except Exception as e:
         await app.send_message(user_id, f"⚠️ خطأ في البوت: {str(e)[:200]}")
@@ -714,6 +829,7 @@ async def posting(user_id):
         if user_data.get("posting"):
             user_data["posting"] = False
             write(users_db, users)
+            await app.send_message(user_id, "⚠️ توقف النشر بسبب خطأ غير متوقع")
 
 # =================== قسم المالك ===================
 @app.on_message(filters.command("admin") & filters.user(owner))
@@ -792,7 +908,7 @@ async def admin_callbacks(_, callback: CallbackQuery):
             channels.remove(ch)
             write(channels_db, channels)
         await callback.answer("✅ تم الحذف")
-        await admin_callbacks(_, callback)  # تحديث العرض
+        await admin_callbacks(_, callback)
     
     elif data == "admin_addvip":
         await callback.message.delete()
@@ -819,7 +935,7 @@ async def admin_callbacks(_, callback: CallbackQuery):
             return await callback.message.reply("رقم غير صالح")
         
         if target not in users:
-            users[target] = {"vip": True, "accounts": [], "groups": [], "captions": [], "waitTime": 60, "delete_after": 0, "posting": False}
+            users[target] = {"vip": True, "accounts": [], "groups": [], "captions": [], "cycle_time": 60, "smart_delay": True, "delete_after": 0, "posting": False}
         else:
             users[target]["vip"] = True
         
