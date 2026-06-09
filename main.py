@@ -1,624 +1,1013 @@
-"""
-بوت النشر التلقائي للمجموعات
-جميع الحقوق محفوظة للمطور
-"""
-
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, CallbackQuery, ForceReply, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, PeerIdInvalid, ChatWriteForbidden, UserNotParticipant
-import asyncio
-import json
+from pyrogram.types import (
+    Message,
+    CallbackQuery,
+    ForceReply,
+    InlineKeyboardMarkup as Markup,
+    InlineKeyboardButton as Button
+)
+from pyrogram.errors import (
+    PhoneNumberInvalid,
+    PhoneCodeInvalid,
+    PhoneCodeExpired,
+    SessionPasswordNeeded,
+    PasswordHashInvalid,
+    UserNotParticipant,
+    ChatWriteForbidden,
+    PeerIdInvalid,
+    FloodWait
+)
 import os
-import random
-from datetime import datetime
-import re
+os.system("pip install pyro-listener")
+from pyrolistener import Listener, exceptions
+from asyncio import create_task, sleep, get_event_loop
+from datetime import datetime, timedelta
+from pytz import timezone
+from typing import Union
+import json, random
 
 # =================== إعدادات البوت ===================
-API_ID = 34923196
-API_HASH = "b3f6e47ecd3231186f8f7e01ab41938e"
-BOT_TOKEN = "8228434919:AAFTVBCrhCvpgsnnoex-JDt_U-NEk2dfnUU"
-OWNER_ID = 8310839908
-
-app = Client("auto_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# =================== إدارة الملفات ===================
-USERS_FILE = "users.json"
-CHANNELS_FILE = "channels.json"
-
-def load_data(file):
-    if not os.path.exists(file):
-        with open(file, "w", encoding="utf-8") as f:
-            json.dump({} if file == USERS_FILE else [], f, ensure_ascii=False, indent=2)
-    with open(file, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_data(file, data):
-    with open(file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-users = load_data(USERS_FILE)
-channels = load_data(CHANNELS_FILE)
+app = Client(
+    "autoPost",
+    api_id="34923166",
+    api_hash="b3f6e47ecd3231186f8f7e01ab41938e",
+    bot_token='8860124031:AAE2LpN2aoz9wTDtKEx_B9KtBgrSHWtfTrY'
+)
+loop = get_event_loop()
+listener = Listener(client=app)
+owner = 8310839908
+_timezone = timezone("Asia/Baghdad")
 
 # =================== دوال مساعدة ===================
-def get_main_menu(user_id):
+def get_home_markup(user_id):
     user_data = users.get(str(user_id), {})
+    delete_after = user_data.get("delete_after", 0)
+    delete_text = f"🗑 حذف بعد {delete_after} ث" if delete_after > 0 else "🗑 حذف معطل"
+    smart_delay_text = "✅ توزيع ذكي" if user_data.get("smart_delay", True) else "❌ توزيع عادي"
+    
+    accounts_count = len(user_data.get("accounts", []))
     groups_count = len(user_data.get("groups", []))
     captions_count = len(user_data.get("captions", []))
-    is_active = user_data.get("active", False)
     
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📁 جروباتي ({groups_count})", callback_data="show_groups"),
-         InlineKeyboardButton("➕ إضافة جروب", callback_data="add_group")],
-        [InlineKeyboardButton(f"📝 كليشاتي ({captions_count})", callback_data="show_captions"),
-         InlineKeyboardButton("➕ إضافة كليشة", callback_data="add_caption")],
-        [InlineKeyboardButton("⏱ تعيين المدة", callback_data="set_interval"),
-         InlineKeyboardButton("🗑 حذف تلقائي", callback_data="set_auto_delete")],
-        [InlineKeyboardButton("🔄 ترتيب عشوائي", callback_data="toggle_random")],
-        [InlineKeyboardButton("▶️ بدء النشر" if not is_active else "⏹ إيقاف النشر", callback_data="toggle_posting")],
-        [InlineKeyboardButton("📊 الحالة", callback_data="show_status"),
-         InlineKeyboardButton("❌ مسح الكل", callback_data="clear_all")]
+    return Markup([
+        [Button(f"👤 حسابي ({accounts_count})", callback_data="account")],
+        [Button(f"📁 الجروبات ({groups_count})", callback_data="currentSupers"), Button(f"➕ إضافة جروب", callback_data="newSuper")],
+        [Button(f"📝 الكليشات ({captions_count})", callback_data="manageCaptions")],
+        [Button(smart_delay_text, callback_data="toggleSmartDelay")],
+        [Button(f"⏱ المدة الإجمالية: {user_data.get('cycle_time', 60)}ث", callback_data="setCycleTime")],
+        [Button(delete_text, callback_data="setDeleteAfter")],
+        [Button("▶️ بدء النشر", callback_data="startPosting"), Button("⏹ إيقاف", callback_data="stopPosting")],
+        [Button("📊 الحالة", callback_data="status")]
     ])
 
-def format_number(num):
-    return f"{num:,}"
+def get_accounts_markup(user_id):
+    accounts = users.get(str(user_id), {}).get("accounts", [])
+    markup = []
+    for idx, acc in enumerate(accounts):
+        phone = acc.get("phone", "رقم غير معروف")
+        is_active = "✅" if users[str(user_id)].get("active_account") == idx else "⚪"
+        markup.append([Button(f"{is_active} {phone}", callback_data=f"selectAcc_{idx}"), Button("🗑", callback_data=f"delAcc_{idx}")])
+    markup.append([Button("➕ إضافة حساب", callback_data="addAccount")])
+    markup.append([Button("🔙 رجوع", callback_data="toHome")])
+    return Markup(markup)
 
-# =================== أوامر البوت ===================
-@app.on_message(filters.command("start") & filters.private)
-async def start_command(client, message):
-    user_id = str(message.from_user.id)
-    
-    # التحقق من الاشتراك الإجباري
-    for channel in channels:
+def get_groups_markup(user_id):
+    groups = users.get(str(user_id), {}).get("groups", [])
+    markup = []
+    for idx, g in enumerate(groups):
+        gid = g["id"]
         try:
-            member = await client.get_chat_member(channel, message.from_user.id)
-            if member.status == "left":
-                return await message.reply(f"⚠️ اشترك أولاً في قناة @{channel}\nثم أعد إرسال /start")
+            chat = app.get_chat(gid)
+            name = chat.title if hasattr(chat, 'title') else str(gid)
         except:
-            return await message.reply(f"⚠️ اشترك أولاً في قناة @{channel}\nثم أعد إرسال /start")
-    
-    # إنشاء مستخدم جديد
-    if user_id not in users:
-        users[user_id] = {
-            "groups": [],
-            "captions": [],
-            "session": None,
-            "interval": 60,
-            "auto_delete": 0,
-            "active": False,
-            "random_order": True,
-            "last_post": None
-        }
-        save_data(USERS_FILE, users)
-    
-    await message.reply(
-        f"✨ **مرحباً {message.from_user.first_name}** ✨\n\n"
-        f"📌 **بوت النشر التلقائي للمجموعات**\n\n"
-        f"🔹 **المميزات:**\n"
-        f"• إضافة جروبات متعددة\n"
-        f"• إضافة كليشات متعددة\n"
-        f"• نشر تلقائي حسب المدة المحددة\n"
-        f"• ترتيب عشوائي للجروبات والكليشات\n"
-        f"• حذف تلقائي للرسائل\n\n"
-        f"📖 **الخطوات:**\n"
-        f"1️⃣ أضف جروبات\n"
-        f"2️⃣ أضف كليشات\n"
-        f"3️⃣ اضبط المدة\n"
-        f"4️⃣ ابدأ النشر\n\n"
-        f"⚠️ **ملاحظة:** يجب تسجيل الدخول أولاً باستخدام أمر /login",
-        reply_markup=get_main_menu(user_id)
-    )
+            name = str(gid)
+        name = name[:25] + ".." if len(name) > 25 else name
+        markup.append([Button(f"📌 {name}", callback_data=f"ignore"), Button("🗑", callback_data=f"delGroup_{idx}")])
+    if not markup:
+        markup.append([Button("❌ لا توجد جروبات", callback_data="ignore")])
+    markup.append([Button("🔙 رجوع", callback_data="toHome")])
+    return Markup(markup)
 
-@app.on_message(filters.command("login") & filters.private)
-async def login_command(client, message):
-    user_id = str(message.from_user.id)
-    
-    await message.reply(
-        "🔐 **تسجيل الدخول إلى حساب التليجرام**\n\n"
-        "أرسل رقم هاتفك مع رمز البلد\n"
-        "مثال: +9647700000000\n\n"
-        "أو ارسل /cancel للإلغاء"
-    )
-    
+def get_captions_markup(user_id):
+    captions = users.get(str(user_id), {}).get("captions", [])
+    markup = []
+    for idx, cap in enumerate(captions):
+        short = cap[:20] + ".." if len(cap) > 20 else cap
+        markup.append([Button(f"📄 {short}", callback_data=f"viewCap_{idx}"), Button("🗑", callback_data=f"delCap_{idx}")])
+    if not markup:
+        markup.append([Button("❌ لا توجد كليشات", callback_data="ignore")])
+    markup.append([Button("➕ إضافة كليشه", callback_data="addCaption")])
+    markup.append([Button("🔙 رجوع", callback_data="toHome")])
+    return Markup(markup)
+
+async def delete_message_after_delay(client, chat_id, message_id, delay_seconds):
+    await sleep(delay_seconds)
     try:
-        phone_msg = await client.listen(message.chat.id, timeout=60)
-        if phone_msg.text == "/cancel":
-            return await phone_msg.reply("❌ تم الإلغاء")
-        
-        phone = phone_msg.text.strip()
-        
-        # إنشاء عميل مؤقت
-        temp_client = Client("temp", api_id=API_ID, api_hash=API_HASH, in_memory=True)
-        await temp_client.connect()
-        
-        try:
-            sent_code = await temp_client.send_code(phone)
-        except Exception as e:
-            await temp_client.disconnect()
-            return await phone_msg.reply(f"❌ خطأ: {str(e)}")
-        
-        await phone_msg.reply("📨 تم إرسال الكود. أرسله الآن:")
-        
-        code_msg = await client.listen(message.chat.id, timeout=120)
-        if code_msg.text == "/cancel":
-            await temp_client.disconnect()
-            return await code_msg.reply("❌ تم الإلغاء")
-        
-        try:
-            await temp_client.sign_in(phone, sent_code.phone_code_hash, code_msg.text)
-        except Exception as e:
-            if "PASSWORD" in str(e):
-                await code_msg.reply("🔐 أدخل كلمة مرور التحقق بخطوتين:")
-                password_msg = await client.listen(message.chat.id, timeout=60)
-                if password_msg.text == "/cancel":
-                    await temp_client.disconnect()
-                    return await password_msg.reply("❌ تم الإلغاء")
-                await temp_client.check_password(password_msg.text)
-            else:
-                await temp_client.disconnect()
-                return await code_msg.reply(f"❌ خطأ: {str(e)}")
-        
-        # حفظ الجلسة
-        session_string = await temp_client.export_session_string()
-        await temp_client.disconnect()
-        
-        users[user_id]["session"] = session_string
-        save_data(USERS_FILE, users)
-        
-        await client.send_message(message.chat.id, "✅ **تم تسجيل الدخول بنجاح!**", reply_markup=get_main_menu(user_id))
-        
-    except asyncio.TimeoutError:
-        await message.reply("⏰ انتهى الوقت")
-
-# =================== أزرار التحكم ===================
-@app.on_callback_query()
-async def handle_callback(client, callback):
-    user_id = str(callback.from_user.id)
-    data = callback.data
-    
-    if data == "show_groups":
-        groups = users[user_id].get("groups", [])
-        if not groups:
-            text = "📁 **لا توجد جروبات مضافه**\n\nاضغط على 'إضافة جروب' لإضافة مجموعة جديدة"
-        else:
-            text = "📁 **قائمة الجروبات:**\n\n"
-            for i, group in enumerate(groups, 1):
-                text += f"{i}. `{group}`\n"
-            text += f"\n📊 المجموع: {len(groups)} جروب"
-        
-        await callback.message.edit_text(text, reply_markup=get_main_menu(user_id))
-        await callback.answer()
-    
-    elif data == "add_group":
-        await callback.message.edit_text(
-            "➕ **إضافة جروب جديد**\n\n"
-            "أرسل معرف الجروب (يبدأ بـ -100)\n"
-            "مثال: -1001234567890\n\n"
-            "أو أرسل رابط الدعوة\n"
-            "مثال: https://t.me/joinchat/xxxxx\n\n"
-            "أو ارسل /cancel للإلغاء"
-        )
-        await callback.answer()
-        
-        try:
-            group_msg = await client.listen(callback.from_user.id, timeout=60)
-            if group_msg.text == "/cancel":
-                return await group_msg.reply("❌ تم الإلغاء", reply_markup=get_main_menu(user_id))
-            
-            group_id = None
-            text = group_msg.text.strip()
-            
-            if text.startswith("-") and text[1:].isdigit():
-                group_id = text
-            elif "t.me/" in text:
-                try:
-                    username = text.split("t.me/")[-1].split("?")[0]
-                    chat = await client.get_chat(username)
-                    group_id = str(chat.id)
-                except:
-                    pass
-            
-            if group_id:
-                if group_id not in users[user_id]["groups"]:
-                    users[user_id]["groups"].append(group_id)
-                    save_data(USERS_FILE, users)
-                    await group_msg.reply(f"✅ تم إضافة الجروب `{group_id}`", reply_markup=get_main_menu(user_id))
-                else:
-                    await group_msg.reply("⚠️ هذا الجروب مضاف بالفعل", reply_markup=get_main_menu(user_id))
-            else:
-                await group_msg.reply("❌ المعرف غير صالح", reply_markup=get_main_menu(user_id))
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت", reply_markup=get_main_menu(user_id))
-    
-    elif data == "show_captions":
-        captions = users[user_id].get("captions", [])
-        if not captions:
-            text = "📝 **لا توجد كليشات**\n\nاضغط على 'إضافة كليشة' لإضافة كليشة جديدة"
-        else:
-            text = "📝 **قائمة الكليشات:**\n\n"
-            for i, cap in enumerate(captions, 1):
-                short = cap[:50] + "..." if len(cap) > 50 else cap
-                text += f"{i}. {short}\n"
-            text += f"\n📊 المجموع: {len(captions)} كليشة"
-        
-        await callback.message.edit_text(text, reply_markup=get_main_menu(user_id))
-        await callback.answer()
-    
-    elif data == "add_caption":
-        await callback.message.edit_text(
-            "📝 **إضافة كليشة جديدة**\n\n"
-            "أرسل النص الذي تريد نشره\n"
-            "يمكنك استخدام HTML و Emoji\n\n"
-            "أو ارسل /cancel للإلغاء"
-        )
-        await callback.answer()
-        
-        try:
-            caption_msg = await client.listen(callback.from_user.id, timeout=120)
-            if caption_msg.text == "/cancel":
-                return await caption_msg.reply("❌ تم الإلغاء", reply_markup=get_main_menu(user_id))
-            
-            caption_text = caption_msg.text
-            users[user_id]["captions"].append(caption_text)
-            save_data(USERS_FILE, users)
-            
-            await caption_msg.reply(f"✅ تم إضافة الكليشة #{len(users[user_id]['captions'])}", reply_markup=get_main_menu(user_id))
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت", reply_markup=get_main_menu(user_id))
-    
-    elif data == "set_interval":
-        await callback.message.edit_text(
-            "⏱ **تعيين المدة بين الرسائل**\n\n"
-            "أرسل المدة بالثواني\n"
-            "الحد الأدنى: 10 ثوانٍ\n"
-            "الحد الأقصى: 3600 ثانية (ساعة)\n\n"
-            "مثال: 60 (دقيقة واحدة)\n\n"
-            "أو ارسل /cancel للإلغاء"
-        )
-        await callback.answer()
-        
-        try:
-            time_msg = await client.listen(callback.from_user.id, timeout=60)
-            if time_msg.text == "/cancel":
-                return await time_msg.reply("❌ تم الإلغاء", reply_markup=get_main_menu(user_id))
-            
-            interval = int(time_msg.text)
-            if interval < 10:
-                interval = 10
-            elif interval > 3600:
-                interval = 3600
-            
-            users[user_id]["interval"] = interval
-            save_data(USERS_FILE, users)
-            
-            await time_msg.reply(f"✅ تم تعيين المدة إلى {interval} ثانية", reply_markup=get_main_menu(user_id))
-        except ValueError:
-            await callback.message.reply("❌ رقم غير صالح", reply_markup=get_main_menu(user_id))
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت", reply_markup=get_main_menu(user_id))
-    
-    elif data == "set_auto_delete":
-        current = users[user_id].get("auto_delete", 0)
-        await callback.message.edit_text(
-            f"🗑 **تعيين الحذف التلقائي**\n\n"
-            f"الوضع الحالي: {'معطل' if current == 0 else f'{current} ثانية'}\n\n"
-            "أرسل المدة بالثواني\n"
-            "0 لتعطيل الحذف\n"
-            "مثال: 1800 (نصف ساعة)\n\n"
-            "أو ارسل /cancel للإلغاء"
-        )
-        await callback.answer()
-        
-        try:
-            delete_msg = await client.listen(callback.from_user.id, timeout=60)
-            if delete_msg.text == "/cancel":
-                return await delete_msg.reply("❌ تم الإلغاء", reply_markup=get_main_menu(user_id))
-            
-            auto_delete = int(delete_msg.text)
-            if auto_delete < 0:
-                auto_delete = 0
-            elif auto_delete > 86400:
-                auto_delete = 86400
-            
-            users[user_id]["auto_delete"] = auto_delete
-            save_data(USERS_FILE, users)
-            
-            if auto_delete == 0:
-                await delete_msg.reply("✅ تم تعطيل الحذف التلقائي", reply_markup=get_main_menu(user_id))
-            else:
-                await delete_msg.reply(f"✅ سيتم حذف الرسائل بعد {auto_delete} ثانية", reply_markup=get_main_menu(user_id))
-        except ValueError:
-            await callback.message.reply("❌ رقم غير صالح", reply_markup=get_main_menu(user_id))
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت", reply_markup=get_main_menu(user_id))
-    
-    elif data == "toggle_random":
-        current = users[user_id].get("random_order", True)
-        users[user_id]["random_order"] = not current
-        save_data(USERS_FILE, users)
-        
-        status = "مفعل ✅" if not current else "معطل ❌"
-        await callback.answer(f"تم {status} الترتيب العشوائي", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=get_main_menu(user_id))
-    
-    elif data == "toggle_posting":
-        groups = users[user_id].get("groups", [])
-        captions = users[user_id].get("captions", [])
-        session = users[user_id].get("session")
-        
-        if not users[user_id].get("active"):
-            # بدء النشر
-            if not groups:
-                return await callback.answer("❌ أضف جروباً أولاً!", show_alert=True)
-            if not captions:
-                return await callback.answer("❌ أضف كليشة أولاً!", show_alert=True)
-            if not session:
-                return await callback.answer("❌ سجل دخولك أولاً!\nاستخدم أمر /login", show_alert=True)
-            
-            users[user_id]["active"] = True
-            save_data(USERS_FILE, users)
-            
-            await callback.answer("✅ تم بدء النشر", show_alert=True)
-            await callback.message.edit_text("✅ **تم بدء النشر التلقائي**\n\nجارٍ الإرسال...", reply_markup=get_main_menu(user_id))
-            
-            # بدء مهمة النشر
-            asyncio.create_task(posting_loop(client, int(user_id)))
-        else:
-            # إيقاف النشر
-            users[user_id]["active"] = False
-            save_data(USERS_FILE, users)
-            await callback.answer("⏹ تم إيقاف النشر", show_alert=True)
-            await callback.message.edit_text("⏹ **تم إيقاف النشر التلقائي**", reply_markup=get_main_menu(user_id))
-    
-    elif data == "show_status":
-        user_data = users[user_id]
-        groups = user_data.get("groups", [])
-        captions = user_data.get("captions", [])
-        
-        status_text = f"📊 **حالة البوت**\n\n"
-        status_text += f"📁 الجروبات: {len(groups)}\n"
-        status_text += f"📝 الكليشات: {len(captions)}\n"
-        status_text += f"⏱ المدة: {user_data.get('interval', 60)} ثانية\n"
-        status_text += f"🗑 حذف: {user_data.get('auto_delete', 0)} ثانية\n"
-        status_text += f"🔄 عشوائي: {'مفعل ✅' if user_data.get('random_order', True) else 'معطل ❌'}\n"
-        status_text += f"🔐 حساب: {'مسجل ✅' if user_data.get('session') else 'غير مسجل ❌'}\n"
-        status_text += f"▶️ النشر: {'يعمل 🟢' if user_data.get('active') else 'متوقف 🔴'}\n"
-        
-        if user_data.get("last_post"):
-            status_text += f"\n📅 آخر نشر: {user_data['last_post']}"
-        
-        await callback.message.edit_text(status_text, reply_markup=get_main_menu(user_id))
-        await callback.answer()
-    
-    elif data == "clear_all":
-        await callback.message.edit_text(
-            "⚠️ **تحذير!**\n\n"
-            "هل أنت متأكد من حذف جميع الجروبات والكليشات؟\n\n"
-            "هذا الإجراء لا يمكن التراجع عنه.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ نعم، احذف الكل", callback_data="confirm_clear")],
-                [InlineKeyboardButton("❌ لا، إلغاء", callback_data="cancel_clear")]
-            ])
-        )
-        await callback.answer()
-    
-    elif data == "confirm_clear":
-        users[user_id]["groups"] = []
-        users[user_id]["captions"] = []
-        save_data(USERS_FILE, users)
-        await callback.message.edit_text("✅ **تم حذف جميع الجروبات والكليشات**", reply_markup=get_main_menu(user_id))
-        await callback.answer()
-    
-    elif data == "cancel_clear":
-        await callback.message.edit_text("❌ تم الإلغاء", reply_markup=get_main_menu(user_id))
-        await callback.answer()
-
-# =================== دالة النشر الرئيسية ===================
-async def posting_loop(client, user_id):
-    user_id_str = str(user_id)
-    
-    while users[user_id_str].get("active", False):
-        groups = users[user_id_str].get("groups", []).copy()
-        captions = users[user_id_str].get("captions", []).copy()
-        interval = users[user_id_str].get("interval", 60)
-        auto_delete = users[user_id_str].get("auto_delete", 0)
-        random_order = users[user_id_str].get("random_order", True)
-        session_string = users[user_id_str].get("session")
-        
-        if not groups or not captions:
-            users[user_id_str]["active"] = False
-            save_data(USERS_FILE, users)
-            await client.send_message(user_id, "⚠️ توقف النشر: لا توجد جروبات أو كليشات")
-            break
-        
-        # ترتيب عشوائي
-        if random_order:
-            groups = random.sample(groups, len(groups))
-            captions = random.sample(captions, len(captions))
-        
-        success_count = 0
-        fail_count = 0
-        
-        # إنشاء عميل النشر
-        try:
-            user_client = Client(f"user_{user_id}", api_id=API_ID, api_hash=API_HASH, session_string=session_string)
-            await user_client.start()
-        except Exception as e:
-            await client.send_message(user_id, f"❌ فشل تسجيل الدخول: {str(e)[:100]}")
-            users[user_id_str]["active"] = False
-            save_data(USERS_FILE, users)
-            break
-        
-        # إرسال لكل مجموعة
-        for group_id in groups:
-            if not users[user_id_str].get("active", False):
-                break
-            
-            # اختيار كليشة عشوائية
-            caption = random.choice(captions)
-            
-            try:
-                # إرسال الرسالة
-                msg = await user_client.send_message(int(group_id), caption)
-                success_count += 1
-                await client.send_message(user_id, f"✅ تم الإرسال إلى {group_id}")
-                
-                # حذف تلقائي
-                if auto_delete > 0:
-                    asyncio.create_task(delete_message_after(msg, auto_delete))
-                
-            except FloodWait as e:
-                await client.send_message(user_id, f"⏳ انتظر {e.value} ثانية (FloodWait)")
-                await asyncio.sleep(e.value)
-                continue
-            except (PeerIdInvalid, ChatWriteForbidden, UserNotParticipant) as e:
-                fail_count += 1
-                await client.send_message(user_id, f"❌ فشل الإرسال إلى {group_id}: {type(e).__name__}")
-            except Exception as e:
-                fail_count += 1
-                await client.send_message(user_id, f"❌ خطأ: {str(e)[:50]}")
-            
-            # انتظار المدة
-            await asyncio.sleep(interval)
-        
-        await user_client.stop()
-        
-        # تحديث آخر نشر
-        users[user_id_str]["last_post"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        save_data(USERS_FILE, users)
-        
-        # إرسال تقرير
-        await client.send_message(
-            user_id,
-            f"📊 **تقرير الدورة**\n\n"
-            f"✅ نجح: {success_count}\n"
-            f"❌ فشل: {fail_count}\n"
-            f"📈 المجموع: {success_count + fail_count}\n"
-            f"⏱ الوقت: {interval} ثانية"
-        )
-        
-        # انتظار بين الدورات
-        await asyncio.sleep(5)
-
-async def delete_message_after(msg, delay):
-    await asyncio.sleep(delay)
-    try:
-        await msg.delete()
+        await client.delete_messages(chat_id, message_id)
     except:
         pass
 
-# =================== إدارة المالك ===================
-@app.on_message(filters.command("admin") & filters.user(OWNER_ID))
-async def admin_command(client, message):
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 إحصائيات", callback_data="admin_stats"),
-         InlineKeyboardButton("📢 قنوات", callback_data="admin_channels")],
-        [InlineKeyboardButton("👑 إضافة VIP", callback_data="admin_add_vip"),
-         InlineKeyboardButton("👑 حذف VIP", callback_data="admin_remove_vip")],
-        [InlineKeyboardButton("📋 المستخدمين", callback_data="admin_users")]
+def calculate_delays(num_groups: int, cycle_time: int) -> list:
+    """
+    حساب الفواصل الزمنية بين الجروبات
+    المبدأ: المدة الإجمالية / عدد الجروبات = متوسط الفاصل
+    مع إضافة عشوائية لتجنب النمطية
+    """
+    if num_groups <= 1:
+        return []
+    
+    # متوسط الفاصل بين كل جروب وآخر
+    avg_interval = cycle_time / num_groups
+    
+    delays = []
+    remaining_time = cycle_time
+    
+    for i in range(num_groups - 1):
+        # عشوائية بين -30% و +30% من متوسط الفاصل
+        variation = random.uniform(-0.3, 0.3) * avg_interval
+        delay = max(2, avg_interval + variation)  # لا تقل عن 2 ثانية
+        
+        if i == num_groups - 2:
+            # آخر فاصل - نضبطه ليتناسب مع الوقت المتبقي
+            delay = max(2, remaining_time)
+        else:
+            remaining_time -= delay
+        
+        delays.append(delay)
+    
+    return delays
+
+# =================== أوامر المستخدم ===================
+@app.on_message(filters.command("start") & filters.private)
+async def start(_: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # التحقق من الاشتراك
+    for channel in channels:
+        try:
+            await app.get_chat_member(channel, user_id)
+        except UserNotParticipant:
+            return await message.reply(f"⚠️ اشترك أولاً في قناة @{channel}\nثم أعد إرسال /start")
+    
+    # إنشاء حساب جديد للمستخدم
+    if str(user_id) not in users:
+        users[str(user_id)] = {
+            "vip": (user_id == owner),
+            "accounts": [],
+            "active_account": None,
+            "groups": [],
+            "captions": [],
+            "cycle_time": 60,  # المدة الإجمالية للدورة بالثواني
+            "smart_delay": True,  # تفعيل التوزيع الذكي
+            "delete_after": 0,
+            "posting": False
+        }
+        write(users_db, users)
+    
+    if user_id != owner and not users[str(user_id)]["vip"]:
+        return await message.reply("❌ هذا البوت خاص بالمطور فقط.\nتواصل مع @A_A_H_H")
+    
+    await message.reply(
+        f"✨ **مرحباً {message.from_user.first_name}** ✨\n\n"
+        f"📌 **كيف يعمل التوزيع الذكي؟**\n"
+        f"🔹 إذا حددت مدة إجمالية 200 ثانية\n"
+        f"🔹 ولديك 10 جروبات\n"
+        f"🔹 فسيتم التوزيع كالتالي:\n"
+        f"   • 200 ÷ 10 = 20 ثانية متوسط بين كل جروب\n"
+        f"   • مع إضافة عشوائية ±30% لتجنب النمطية\n"
+        f"   • ترتيب الجروبات عشوائي\n"
+        f"   • كليشات عشوائية لكل إرسال\n\n"
+        f"📖 **الخطوات:**\n"
+        f"1️⃣ أضف حساباً عبر 'حسابي'\n"
+        f"2️⃣ أضف الجروبات عبر 'إضافة جروب'\n"
+        f"3️⃣ أضف كليشات عبر 'الكليشات'\n"
+        f"4️⃣ اضبط المدة الإجمالية\n"
+        f"5️⃣ اضغط 'بدء النشر'",
+        reply_markup=get_home_markup(user_id)
+    )
+
+@app.on_callback_query(filters.regex(r"^(toHome)$"))
+async def toHome(_: Client, callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🏠 **القائمة الرئيسية**\n\n"
+        "📌 التوزيع الذكي: المدة الإجمالية تقسم على عدد الجروبات",
+        reply_markup=get_home_markup(callback.from_user.id)
+    )
+
+@app.on_callback_query(filters.regex(r"^(toggleSmartDelay)$"))
+async def toggleSmartDelay(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    current = users[str(user_id)].get("smart_delay", True)
+    users[str(user_id)]["smart_delay"] = not current
+    write(users_db, users)
+    
+    status = "مفعل ✅" if not current else "معطل ❌"
+    await callback.answer(f"تم {status} التوزيع الذكي", show_alert=True)
+    await callback.message.edit_reply_markup(reply_markup=get_home_markup(user_id))
+
+@app.on_callback_query(filters.regex(r"^(setCycleTime)$"))
+async def setCycleTime(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.delete()
+    
+    try:
+        ask = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="⏱ **تعيين المدة الإجمالية للدورة**\n\n"
+                 "🔹 **كيف يعمل؟**\n"
+                 "المدة الإجمالية ÷ عدد الجروبات = الفاصل بين كل جروب\n\n"
+                 "مثال: 200 ثانية ÷ 10 جروبات = 20 ثانية بين كل إرسال\n\n"
+                 "📝 **أرسل المدة بالثواني:**\n"
+                 "(الحد الأدنى: 30 ثانية)\n\n"
+                 "أو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=60
+        )
+    except exceptions.TimeOut:
+        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    if ask.text == "/cancel":
+        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    try:
+        cycle_time = int(ask.text)
+        if cycle_time < 30:
+            return await ask.reply("⚠️ المدة يجب أن تكون 30 ثانية على الأقل", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+        
+        users[str(user_id)]["cycle_time"] = cycle_time
+        write(users_db, users)
+        
+        # شرح للمستخدم كيف سيتم التوزيع
+        groups_count = len(users[str(user_id)].get("groups", []))
+        if groups_count > 0:
+            avg_delay = cycle_time / groups_count
+            await ask.reply(
+                f"✅ **تم تعيين المدة الإجمالية إلى {cycle_time} ثانية**\n\n"
+                f"📊 **حسب الوضع الحالي:**\n"
+                f"• عدد الجروبات: {groups_count}\n"
+                f"• متوسط الفاصل بين الجروبات: {avg_delay:.1f} ثانية\n"
+                f"• مع عشوائية ±30% لتجنب النمطية\n"
+                f"• ترتيب الجروبات عشوائي\n"
+                f"• كليشات عشوائية لكل إرسال",
+                reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]])
+            )
+        else:
+            await ask.reply(f"✅ **تم تعيين المدة الإجمالية إلى {cycle_time} ثانية**\n\n⚠️ أضف جروبات أولاً لتفعيل التوزيع الذكي",
+                          reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    except:
+        await ask.reply("❌ رقم غير صالح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+
+@app.on_callback_query(filters.regex(r"^(status)$"))
+async def show_status(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    data = users.get(str(user_id), {})
+    groups_count = len(data.get('groups', []))
+    cycle_time = data.get('cycle_time', 60)
+    avg_delay = cycle_time / groups_count if groups_count > 0 else 0
+    
+    status_text = f"📊 **حالة البوت**\n\n"
+    status_text += f"👤 **الحسابات:** {len(data.get('accounts', []))}\n"
+    if data.get('active_account') is not None:
+        accounts = data.get('accounts', [])
+        if data['active_account'] < len(accounts):
+            status_text += f"   ✅ النشط: {accounts[data['active_account']].get('phone', 'غير معروف')}\n"
+    status_text += f"📁 **الجروبات:** {groups_count}\n"
+    status_text += f"📝 **الكليشات:** {len(data.get('captions', []))}\n\n"
+    status_text += f"⏱ **المدة الإجمالية:** {cycle_time} ثانية\n"
+    status_text += f"📊 **متوسط الفاصل:** {avg_delay:.1f} ثانية\n"
+    status_text += f"🔄 **توزيع ذكي:** {'✅ مفعل' if data.get('smart_delay', True) else '❌ معطل'}\n"
+    status_text += f"🗑 **حذف تلقائي:** {data.get('delete_after', 0)} ثانية\n"
+    status_text += f"▶️ **حالة النشر:** {'🟢 يعمل' if data.get('posting') else '🔴 متوقف'}\n\n"
+    status_text += f"📌 **آلية التوزيع:**\n"
+    status_text += f"• المدة الإجمالية ÷ عدد الجروبات = الفاصل\n"
+    status_text += f"• ترتيب عشوائي للجروبات\n"
+    status_text += f"• كليشات عشوائية لكل إرسال\n"
+    status_text += f"• عشوائية ±30% على الفواصل"
+    
+    await callback.message.edit_text(status_text, reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+
+# =================== إدارة الحسابات ===================
+@app.on_callback_query(filters.regex(r"^(account)$"))
+async def account(_: Client, callback: CallbackQuery):
+    await callback.message.edit_text(
+        "👤 **إدارة الحسابات**\n\n"
+        "📌 يمكنك إضافة عدة حسابات واختيار أي منها للنشر",
+        reply_markup=get_accounts_markup(callback.from_user.id)
+    )
+
+@app.on_callback_query(filters.regex(r"^(addAccount)$"))
+async def addAccount(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.delete()
+    
+    try:
+        ask = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="📱 **أرسل رقم هاتفك**\nمثال: +9647700000000\n\nأو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=60
+        )
+    except exceptions.TimeOut:
+        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+    
+    if ask.text == "/cancel":
+        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+    
+    phone = ask.text.strip()
+    await add_account_step2(ask, user_id, phone)
+
+async def add_account_step2(msg: Message, user_id: int, phone: str):
+    temp_client = Client("temp", in_memory=True, api_id=app.api_id, api_hash=app.api_hash)
+    await temp_client.connect()
+    
+    try:
+        sent_code = await temp_client.send_code(phone)
+    except PhoneNumberInvalid:
+        await msg.reply("❌ رقم الهاتف غير صحيح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+        await temp_client.disconnect()
+        return
+    
+    try:
+        code = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="📨 **أرسل الكود المرسل إليك**\n\nأو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=120
+        )
+    except exceptions.TimeOut:
+        await msg.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+        await temp_client.disconnect()
+        return
+    
+    if code.text == "/cancel":
+        await code.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+        await temp_client.disconnect()
+        return
+    
+    try:
+        await temp_client.sign_in(phone, sent_code.phone_code_hash, code.text)
+    except PhoneCodeInvalid:
+        await code.reply("❌ الكود غير صحيح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+        await temp_client.disconnect()
+        return
+    except PhoneCodeExpired:
+        await code.reply("❌ الكود منتهي الصلاحية", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+        await temp_client.disconnect()
+        return
+    except SessionPasswordNeeded:
+        try:
+            password = await listener.listen(
+                from_id=user_id, chat_id=user_id,
+                text="🔐 **أدخل كلمة مرور التحقق بخطوتين**\n\nأو ارسل /cancel للإلغاء",
+                reply_markup=ForceReply(),
+                timeout=60
+            )
+        except exceptions.TimeOut:
+            await msg.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+            await temp_client.disconnect()
+            return
+        
+        if password.text == "/cancel":
+            await password.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+            await temp_client.disconnect()
+            return
+        
+        try:
+            await temp_client.check_password(password.text)
+        except PasswordHashInvalid:
+            await password.reply("❌ كلمة المرور غير صحيحة", reply_markup=Markup([[Button("🔙 رجوع", callback_data="account")]]))
+            await temp_client.disconnect()
+            return
+    
+    session_string = await temp_client.export_session_string()
+    await temp_client.disconnect()
+    
+    # حفظ الحساب
+    accounts = users[str(user_id)].get("accounts", [])
+    accounts.append({
+        "phone": phone,
+        "session": session_string
+    })
+    users[str(user_id)]["accounts"] = accounts
+    
+    # إذا كان أول حساب، اجعله نشطاً
+    if users[str(user_id)].get("active_account") is None:
+        users[str(user_id)]["active_account"] = len(accounts) - 1
+    
+    write(users_db, users)
+    
+    await app.send_message(user_id, f"✅ **تم إضافة الحساب بنجاح!**\n📱 {phone}\n\n" + 
+                          ("🔵 هذا الحساب هو النشط حالياً" if users[str(user_id)]["active_account"] == len(accounts)-1 else ""),
+                          reply_markup=Markup([[Button("🔙 رجوع للحسابات", callback_data="account")]]))
+
+@app.on_callback_query(filters.regex(r"^(selectAcc_)(\d+)$"))
+async def selectAccount(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    idx = int(callback.data.split("_")[1])
+    accounts = users[str(user_id)].get("accounts", [])
+    
+    if idx < len(accounts):
+        users[str(user_id)]["active_account"] = idx
+        write(users_db, users)
+        await callback.answer(f"✅ تم اختيار الحساب {accounts[idx]['phone']}", show_alert=True)
+    
+    await account(_, callback)
+
+@app.on_callback_query(filters.regex(r"^(delAcc_)(\d+)$"))
+async def deleteAccount(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    idx = int(callback.data.split("_")[1])
+    accounts = users[str(user_id)].get("accounts", [])
+    
+    if idx < len(accounts):
+        removed = accounts.pop(idx)
+        users[str(user_id)]["accounts"] = accounts
+        
+        active = users[str(user_id)].get("active_account")
+        if active == idx:
+            users[str(user_id)]["active_account"] = None if len(accounts) == 0 else 0
+        elif active is not None and active > idx:
+            users[str(user_id)]["active_account"] = active - 1
+        
+        write(users_db, users)
+        await callback.answer(f"✅ تم حذف الحساب {removed['phone']}", show_alert=True)
+    
+    await account(_, callback)
+
+# =================== إدارة الجروبات ===================
+@app.on_callback_query(filters.regex(r"^(newSuper)$"))
+async def newSuper(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.delete()
+    
+    try:
+        ask = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="📌 **أضف مجموعة جديدة**\n\n"
+                 "أرسل معرف المجموعة (يبدأ بـ -100)\n"
+                 "أو رابط الدعوة\n\n"
+                 "مثال: -1001234567890\n"
+                 "أو: https://t.me/joinchat/xxxx\n\n"
+                 "أو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=60
+        )
+    except exceptions.TimeOut:
+        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    if ask.text == "/cancel":
+        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    group_id = None
+    invite_link = None
+    input_text = ask.text.strip()
+    
+    if input_text.startswith("-") and input_text.lstrip("-").isdigit():
+        group_id = int(input_text)
+    elif "t.me/" in input_text:
+        invite_link = input_text
+        try:
+            parts = input_text.split("/")
+            username = parts[-1]
+            chat = await app.get_chat(username)
+            group_id = chat.id
+        except Exception as e:
+            return await ask.reply(f"❌ الرابط غير صالح: {str(e)[:50]}", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    else:
+        return await ask.reply("❌ المعرف أو الرابط غير صالح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    groups = users[str(user_id)].get("groups", [])
+    
+    for g in groups:
+        if g["id"] == group_id:
+            return await ask.reply("⚠️ هذه المجموعة مضافة بالفعل", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    groups.append({
+        "id": group_id,
+        "link": invite_link
+    })
+    users[str(user_id)]["groups"] = groups
+    write(users_db, users)
+    
+    await ask.reply(f"✅ **تم إضافة المجموعة بنجاح!**\n🆔 المعرف: {group_id}", 
+                    reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+
+@app.on_callback_query(filters.regex(r"^(currentSupers)$"))
+async def currentSupers(_: Client, callback: CallbackQuery):
+    await callback.message.edit_text(
+        "📁 **الجروبات المضافة**\n\n"
+        "اضغط على 🗑 لحذف أي مجموعة",
+        reply_markup=get_groups_markup(callback.from_user.id)
+    )
+
+@app.on_callback_query(filters.regex(r"^(delGroup_)(\d+)$"))
+async def delGroup(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    idx = int(callback.data.split("_")[1])
+    groups = users[str(user_id)].get("groups", [])
+    
+    if idx < len(groups):
+        removed = groups.pop(idx)
+        users[str(user_id)]["groups"] = groups
+        write(users_db, users)
+        await callback.answer(f"✅ تم حذف المجموعة {removed['id']}", show_alert=True)
+    
+    await currentSupers(_, callback)
+
+# =================== إدارة الكليشات ===================
+@app.on_callback_query(filters.regex(r"^(manageCaptions)$"))
+async def manageCaptions(_: Client, callback: CallbackQuery):
+    await callback.message.edit_text(
+        "📝 **الكليشات المحفوظة**\n\n"
+        "اضغط على 🗑 لحذف أي كليشة\n"
+        "اضغط على أي كليشة لعرضها كاملة",
+        reply_markup=get_captions_markup(callback.from_user.id)
+    )
+
+@app.on_callback_query(filters.regex(r"^(addCaption)$"))
+async def addCaption(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.delete()
+    
+    try:
+        ask = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="📝 **أضف كليشة جديدة**\n\n"
+                 "أرسل النص الذي تريد نشره\n"
+                 "يمكنك استخدام HTML و Emoji\n\n"
+                 "أو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=120
+        )
+    except exceptions.TimeOut:
+        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="manageCaptions")]]))
+    
+    if ask.text == "/cancel":
+        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="manageCaptions")]]))
+    
+    captions = users[str(user_id)].get("captions", [])
+    captions.append(ask.text)
+    users[str(user_id)]["captions"] = captions
+    write(users_db, users)
+    
+    await ask.reply(f"✅ **تم إضافة الكليشة #{len(captions)}**\n\n📄 {ask.text[:100]}{'...' if len(ask.text) > 100 else ''}",
+                    reply_markup=Markup([[Button("🔙 رجوع", callback_data="manageCaptions")]]))
+
+@app.on_callback_query(filters.regex(r"^(viewCap_)(\d+)$"))
+async def viewCaption(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    idx = int(callback.data.split("_")[1])
+    captions = users[str(user_id)].get("captions", [])
+    
+    if idx < len(captions):
+        await callback.answer("📄 معاينة الكليشة", show_alert=True)
+        await callback.message.reply(
+            f"📄 **الكليشة #{idx+1}**\n\n{captions[idx]}\n\n"
+            f"📏 طول النص: {len(captions[idx])} حرف",
+            reply_markup=Markup([[Button("🔙 رجوع", callback_data="manageCaptions")]])
+        )
+
+@app.on_callback_query(filters.regex(r"^(delCap_)(\d+)$"))
+async def delCaption(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    idx = int(callback.data.split("_")[1])
+    captions = users[str(user_id)].get("captions", [])
+    
+    if idx < len(captions):
+        removed = captions.pop(idx)
+        users[str(user_id)]["captions"] = captions
+        write(users_db, users)
+        await callback.answer(f"✅ تم حذف الكليشة: {removed[:30]}", show_alert=True)
+    
+    await manageCaptions(_, callback)
+
+# =================== إعدادات أخرى ===================
+@app.on_callback_query(filters.regex(r"^(setDeleteAfter)$"))
+async def setDeleteAfter(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.delete()
+    
+    try:
+        ask = await listener.listen(
+            from_id=user_id, chat_id=user_id,
+            text="🗑 **تعيين مدة حذف الرسائل**\n\n"
+                 "أرسل المدة بالثواني\n"
+                 "مثال: 1800 (نصف ساعة)\n"
+                 "0 لتعطيل الحذف التلقائي\n\n"
+                 "أو ارسل /cancel للإلغاء",
+            reply_markup=ForceReply(),
+            timeout=60
+        )
+    except exceptions.TimeOut:
+        return await callback.message.reply("⏰ انتهى الوقت", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    if ask.text == "/cancel":
+        return await ask.reply("❌ تم الإلغاء", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    
+    try:
+        seconds = int(ask.text)
+        if seconds < 0:
+            raise ValueError
+        users[str(user_id)]["delete_after"] = seconds
+        write(users_db, users)
+        if seconds == 0:
+            await ask.reply(f"✅ **تم تعطيل الحذف التلقائي**", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+        else:
+            await ask.reply(f"✅ **سيتم حذف الرسائل بعد {seconds} ثانية**", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+    except:
+        await ask.reply("❌ رقم غير صالح", reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]]))
+
+# =================== بدء وإيقاف النشر ===================
+active_tasks = set()
+
+@app.on_callback_query(filters.regex(r"^(startPosting)$"))
+async def startPosting(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_data = users.get(str(user_id), {})
+    
+    # التحقق من وجود حساب نشط
+    active_idx = user_data.get("active_account")
+    if active_idx is None or len(user_data.get("accounts", [])) == 0:
+        return await callback.answer("❌ لا يوجد حساب! أضف حساباً أولاً", show_alert=True)
+    
+    groups = user_data.get("groups", [])
+    if not groups:
+        return await callback.answer("❌ لا توجد جروبات! أضف جروباً أولاً", show_alert=True)
+    
+    captions = user_data.get("captions", [])
+    if not captions:
+        return await callback.answer("❌ لا توجد كليشات! أضف كليشة أولاً", show_alert=True)
+    
+    if user_data.get("posting"):
+        return await callback.answer("⚠️ النشر مفعل بالفعل", show_alert=True)
+    
+    if str(user_id) in active_tasks:
+        return await callback.answer("⚠️ يتم التشغيل حالياً", show_alert=True)
+    
+    # حساب الإحصائيات
+    cycle_time = user_data.get("cycle_time", 60)
+    groups_count = len(groups)
+    avg_delay = cycle_time / groups_count
+    smart_delay = user_data.get("smart_delay", True)
+    
+    summary = f"🚀 **بدء النشر التلقائي**\n\n"
+    summary += f"👤 **الحساب النشط:** {user_data['accounts'][active_idx]['phone']}\n"
+    summary += f"📁 **عدد الجروبات:** {groups_count}\n"
+    summary += f"📝 **عدد الكليشات:** {len(captions)}\n\n"
+    summary += f"⏱ **المدة الإجمالية للدورة:** {cycle_time} ثانية\n"
+    
+    if smart_delay and groups_count > 1:
+        summary += f"📊 **آلية التوزيع الذكي:**\n"
+        summary += f"   • متوسط الفاصل: {avg_delay:.1f} ثانية\n"
+        summary += f"   • ترتيب الجروبات: عشوائي\n"
+        summary += f"   • كليشات: عشوائية لكل إرسال\n"
+        summary += f"   • عشوائية ±30% على الفواصل\n"
+    else:
+        summary += f"📊 **آلية التوزيع العادي:**\n"
+        summary += f"   • انتظار {cycle_time} ثانية بين كل رسالة\n"
+    
+    summary += f"\n🗑 **حذف تلقائي:** {user_data.get('delete_after', 0)} ثانية\n\n"
+    summary += f"✅ جارٍ البدء..."
+    
+    await callback.message.edit_text(summary)
+    
+    users[str(user_id)]["posting"] = True
+    write(users_db, users)
+    
+    task = create_task(posting(user_id))
+    active_tasks.add(str(user_id))
+    task.add_done_callback(lambda t: active_tasks.discard(str(user_id)))
+
+@app.on_callback_query(filters.regex(r"^(stopPosting)$"))
+async def stopPosting(_: Client, callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if not users.get(str(user_id), {}).get("posting"):
+        return await callback.answer("⚠️ النشر متوقف بالفعل", show_alert=True)
+    
+    users[str(user_id)]["posting"] = False
+    write(users_db, users)
+    
+    await callback.message.edit_text(
+        "⏹ **تم إيقاف النشر التلقائي**\n\n"
+        "يمكنك استئنافه لاحقاً من القائمة الرئيسية",
+        reply_markup=Markup([[Button("🔙 رجوع", callback_data="toHome")]])
+    )
+
+# =================== دالة النشر الرئيسية (مع التوزيع الذكي) ===================
+async def send_to_group(client, group_id, caption, delete_after):
+    """إرسال رسالة إلى مجموعة واحدة"""
+    try:
+        msg = await client.send_message(group_id, caption)
+        if delete_after > 0:
+            create_task(delete_message_after_delay(client, group_id, msg.id, delete_after))
+        return True, None
+    except FloodWait as e:
+        return False, f"FloodWait: انتظر {e.value} ثانية"
+    except (PeerIdInvalid, UserNotParticipant, ChatWriteForbidden) as e:
+        return False, f"خطأ في الوصول: {type(e).__name__}"
+    except Exception as e:
+        return False, str(e)[:100]
+
+async def posting(user_id):
+    user_id_str = str(user_id)
+    user_data = users.get(user_id_str, {})
+    
+    if not user_data.get("posting"):
+        return
+    
+    # الحصول على الحساب النشط
+    active_idx = user_data.get("active_account")
+    accounts = user_data.get("accounts", [])
+    if active_idx is None or active_idx >= len(accounts):
+        await app.send_message(user_id, "❌ لا يوجد حساب نشط! الرجاء اختيار حساب")
+        user_data["posting"] = False
+        write(users_db, users)
+        return
+    
+    active_account = accounts[active_idx]
+    session_string = active_account.get("session")
+    
+    if not session_string:
+        await app.send_message(user_id, "❌ جلسة الحساب غير صالحة! الرجاء إعادة تسجيل الدخول")
+        user_data["posting"] = False
+        write(users_db, users)
+        return
+    
+    client = Client(f"user_{user_id}", api_id=app.api_id, api_hash=app.api_hash, session_string=session_string)
+    
+    try:
+        await client.start()
+        await app.send_message(user_id, f"✅ تم تسجيل الدخول إلى {active_account.get('phone', 'الحساب')}")
+    except Exception as e:
+        await app.send_message(user_id, f"❌ فشل تسجيل الدخول: {str(e)[:100]}")
+        user_data["posting"] = False
+        write(users_db, users)
+        return
+    
+    try:
+        while user_data.get("posting"):
+            cycle_time = user_data.get("cycle_time", 60)
+            groups = user_data.get("groups", []).copy()
+            captions = user_data.get("captions", [])
+            delete_after = user_data.get("delete_after", 0)
+            smart_delay = user_data.get("smart_delay", True)
+            
+            if not groups or not captions:
+                user_data["posting"] = False
+                write(users_db, users)
+                await app.send_message(user_id, "⚠️ توقف النشر: لا توجد جروبات أو كليشات")
+                break
+            
+            # خلط ترتيب الجروبات عشوائياً
+            shuffled_groups = groups.copy()
+            random.shuffle(shuffled_groups)
+            
+            num_groups = len(shuffled_groups)
+            
+            # حساب الفواصل الزمنية (فقط إذا كان التوزيع الذكي مفعلاً)
+            if smart_delay and num_groups > 1:
+                delays = calculate_delays(num_groups, cycle_time)
+            else:
+                # الوضع العادي: نفس المدة بين كل رسالة
+                delays = [cycle_time] * (num_groups - 1)
+            
+            success_count = 0
+            fail_count = 0
+            
+            # إرسال الرسائل مع الفواصل المحسوبة
+            for idx, group in enumerate(shuffled_groups):
+                if not user_data.get("posting"):
+                    break
+                
+                group_id = group["id"]
+                # اختيار كليشة عشوائية
+                caption = random.choice(captions)
+                
+                # محاكاة الكتابة البشرية (تأخير قصير عشوائي)
+                await sleep(random.uniform(0.5, 2.0))
+                
+                success, error = await send_to_group(client, group_id, caption, delete_after)
+                
+                if success:
+                    success_count += 1
+                    # إرسال تقرير كل 5 رسائل ناجحة
+                    if success_count % 5 == 0:
+                        await app.send_message(user_id, f"✅ تم إرسال {success_count} رسالة بنجاح")
+                else:
+                    fail_count += 1
+                    if "FloodWait" not in error:
+                        await app.send_message(user_id, f"❌ فشل الإرسال إلى {group_id}: {error}")
+                
+                # انتظار الفاصل الزمني قبل الإرسال التالي (ما عدا آخر رسالة)
+                if idx < len(delays) and user_data.get("posting"):
+                    delay = delays[idx]
+                    # إضافة عشوائية إضافية صغيرة
+                    extra_jitter = random.uniform(0, 2)
+                    await sleep(delay + extra_jitter)
+            
+            # إرسال تقرير الدورة الكامل
+            total_sent = success_count + fail_count
+            await app.send_message(
+                user_id, 
+                f"📊 **تقرير الدورة:**\n"
+                f"• الوقت الإجمالي: {cycle_time} ثانية\n"
+                f"• عدد الجروبات: {num_groups}\n"
+                f"• ✅ نجح: {success_count}\n"
+                f"• ❌ فشل: {fail_count}\n"
+                f"• 📈 نسبة النجاح: {success_count * 100 // total_sent if total_sent > 0 else 0}%"
+            )
+            
+            # انتظار قصير بين الدورات (اختياري، لمنع النمطية)
+            if user_data.get("posting"):
+                await sleep(random.uniform(3, 8))
+            
+    except Exception as e:
+        await app.send_message(user_id, f"⚠️ خطأ في البوت: {str(e)[:200]}")
+    
+    finally:
+        await client.stop()
+        if user_data.get("posting"):
+            user_data["posting"] = False
+            write(users_db, users)
+            await app.send_message(user_id, "⚠️ توقف النشر بسبب خطأ غير متوقع")
+
+# =================== قسم المالك ===================
+@app.on_message(filters.command("admin") & filters.user(owner))
+async def admin_panel(_, message: Message):
+    markup = Markup([
+        [Button("📊 إحصائيات", callback_data="admin_stats"), Button("📢 قنوات الاشتراك", callback_data="admin_channels")],
+        [Button("👑 تفعيل VIP", callback_data="admin_addvip"), Button("👑 إلغاء VIP", callback_data="admin_removevip")],
+        [Button("📋 عرض المستخدمين", callback_data="admin_users")]
     ])
     await message.reply("👑 **لوحة تحكم المالك**", reply_markup=markup)
 
-@app.on_callback_query(filters.user(OWNER_ID))
-async def admin_callback(client, callback):
+@app.on_callback_query(filters.user(owner))
+async def admin_callbacks(_, callback: CallbackQuery):
     data = callback.data
     
     if data == "admin_stats":
-        total_users = len(users)
-        active_users = sum(1 for u in users.values() if u.get("active", False))
+        total = len(users)
+        vip = sum(1 for u in users.values() if u.get("vip", False))
+        posting = sum(1 for u in users.values() if u.get("posting", False))
+        total_accounts = sum(len(u.get("accounts", [])) for u in users.values())
         total_groups = sum(len(u.get("groups", [])) for u in users.values())
-        total_captions = sum(len(u.get("captions", [])) for u in users.values())
         
         await callback.message.edit_text(
             f"📊 **إحصائيات البوت**\n\n"
-            f"👥 المستخدمين: {total_users}\n"
-            f"🟢 النشطاء: {active_users}\n"
-            f"📁 الجروبات: {total_groups}\n"
-            f"📝 الكليشات: {total_captions}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+            f"👥 المستخدمين: {total}\n"
+            f"⭐ VIP: {vip}\n"
+            f"🔄 يعملون: {posting}\n\n"
+            f"👤 إجمالي الحسابات: {total_accounts}\n"
+            f"📁 إجمالي الجروبات: {total_groups}",
+            reply_markup=Markup([[Button("🔙 رجوع", callback_data="admin_back")]])
+        )
+    
+    elif data == "admin_users":
+        user_list = ""
+        for uid, u in users.items():
+            vip = "⭐" if u.get("vip") else "○"
+            posting = "🟢" if u.get("posting") else "⚪"
+            accounts = len(u.get("accounts", []))
+            user_list += f"{vip}{posting} `{uid}` (حسابات: {accounts})\n"
+        
+        if len(user_list) > 4000:
+            user_list = user_list[:4000] + "\n..."
+        
+        await callback.message.edit_text(
+            f"📋 **قائمة المستخدمين**\n\n{user_list}",
+            reply_markup=Markup([[Button("🔙 رجوع", callback_data="admin_back")]])
         )
     
     elif data == "admin_channels":
         markup = []
         for ch in channels:
-            markup.append([InlineKeyboardButton(f"@{ch}", url=f"https://t.me/{ch}"), 
-                          InlineKeyboardButton("🗑", callback_data=f"del_ch_{ch}")])
-        markup.append([InlineKeyboardButton("➕ إضافة", callback_data="admin_add_channel")])
-        markup.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")])
-        await callback.message.edit_text("📢 **قنوات الاشتراك الإجباري**", reply_markup=InlineKeyboardMarkup(markup))
+            markup.append([Button(f"@{ch}", url=f"https://t.me/{ch}"), Button("🗑", callback_data=f"admin_delch_{ch}")])
+        markup.append([Button("➕ إضافة قناة", callback_data="admin_addch")])
+        markup.append([Button("🔙 رجوع", callback_data="admin_back")])
+        await callback.message.edit_text("📢 **قنوات الاشتراك الإجباري**", reply_markup=Markup(markup))
     
-    elif data == "admin_add_channel":
-        await callback.message.edit_text("أرسل معرف القناة (بدون @):")
+    elif data == "admin_addch":
+        await callback.message.delete()
         try:
-            ch_msg = await client.listen(callback.from_user.id, timeout=30)
-            channels.append(ch_msg.text)
-            save_data(CHANNELS_FILE, channels)
-            await ch_msg.reply("✅ تم إضافة القناة")
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت")
+            ask = await listener.listen(
+                from_id=owner, chat_id=owner,
+                text="أرسل معرف القناة بدون @\nمثال: channel_username",
+                reply_markup=ForceReply(),
+                timeout=30
+            )
+        except:
+            return await callback.message.reply("انتهى الوقت")
+        
+        channels.append(ask.text)
+        write(channels_db, channels)
+        await ask.reply("✅ تم إضافة القناة", reply_markup=Markup([[Button("🔙 رجوع", callback_data="admin_back")]]))
     
-    elif data.startswith("del_ch_"):
-        ch = data.replace("del_ch_", "")
+    elif data.startswith("admin_delch_"):
+        ch = data.replace("admin_delch_", "")
         if ch in channels:
             channels.remove(ch)
-            save_data(CHANNELS_FILE, channels)
+            write(channels_db, channels)
         await callback.answer("✅ تم الحذف")
-        await admin_callback(client, callback)
+        await admin_callbacks(_, callback)
     
-    elif data == "admin_users":
-        text = "📋 **قائمة المستخدمين**\n\n"
-        for uid, u in list(users.items())[:50]:
-            vip = "⭐" if uid == OWNER_ID else "○"
-            active = "🟢" if u.get("active") else "⚪"
-            groups = len(u.get("groups", []))
-            text += f"{vip}{active} `{uid}` (ج: {groups})\n"
-        
-        if len(users) > 50:
-            text += f"\n... و {len(users) - 50} آخرين"
-        
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]]))
-    
-    elif data == "admin_add_vip":
-        await callback.message.edit_text("أرسل معرف المستخدم:")
+    elif data == "admin_addvip":
+        await callback.message.delete()
         try:
-            uid_msg = await client.listen(callback.from_user.id, timeout=30)
-            uid = uid_msg.text
-            if uid not in users:
-                users[uid] = {"groups": [], "captions": [], "session": None, "interval": 60, "auto_delete": 0, "active": False, "random_order": True}
-            users[uid]["vip"] = True
-            save_data(USERS_FILE, users)
-            await uid_msg.reply(f"✅ تم تفعيل VIP للمستخدم {uid}")
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت")
-    
-    elif data == "admin_remove_vip":
-        await callback.message.edit_text("أرسل معرف المستخدم:")
+            ask = await listener.listen(
+                from_id=owner, chat_id=owner,
+                text="أرسل معرف المستخدم",
+                reply_markup=ForceReply(),
+                timeout=30
+            )
+        except:
+            return await callback.message.reply("انتهى الوقت")
+        
+        target = ask.text
         try:
-            uid_msg = await client.listen(callback.from_user.id, timeout=30)
-            uid = uid_msg.text
-            if uid in users:
-                users[uid]["vip"] = False
-                save_data(USERS_FILE, users)
-                await uid_msg.reply(f"✅ تم إلغاء VIP للمستخدم {uid}")
-            else:
-                await uid_msg.reply("❌ المستخدم غير موجود")
-        except asyncio.TimeoutError:
-            await callback.message.reply("⏰ انتهى الوقت")
+            days = await listener.listen(
+                from_id=owner, chat_id=owner,
+                text="أرسل عدد الأيام",
+                reply_markup=ForceReply(),
+                timeout=30
+            )
+            days_int = int(days.text)
+        except:
+            return await callback.message.reply("رقم غير صالح")
+        
+        if target not in users:
+            users[target] = {"vip": True, "accounts": [], "groups": [], "captions": [], "cycle_time": 60, "smart_delay": True, "delete_after": 0, "posting": False}
+        else:
+            users[target]["vip"] = True
+        
+        write(users_db, users)
+        await ask.reply(f"✅ تم تفعيل VIP للمستخدم {target} لمدة {days_int} يوم")
+        try:
+            await app.send_message(int(target), f"🎉 تم تفعيل VIP لك لمدة {days_int} يوم!")
+        except:
+            pass
+    
+    elif data == "admin_removevip":
+        await callback.message.delete()
+        try:
+            ask = await listener.listen(
+                from_id=owner, chat_id=owner,
+                text="أرسل معرف المستخدم",
+                reply_markup=ForceReply(),
+                timeout=30
+            )
+        except:
+            return await callback.message.reply("انتهى الوقت")
+        
+        target = ask.text
+        if target in users:
+            users[target]["vip"] = False
+            write(users_db, users)
+            await ask.reply(f"✅ تم إلغاء VIP للمستخدم {target}")
+        else:
+            await ask.reply("❌ المستخدم غير موجود")
     
     elif data == "admin_back":
-        await admin_command(client, callback.message)
+        await admin_panel(_, callback.message)
 
-# =================== تشغيل البوت ===================
+# =================== إدارة التخزين ===================
+def write(fp, data):
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def read(fp):
+    if not os.path.exists(fp):
+        if fp == channels_db:
+            write(fp, [])
+        else:
+            write(fp, {})
+    with open(fp, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+users_db = "users.json"
+channels_db = "channels.json"
+users = read(users_db)
+channels = read(channels_db)
+
+# =================== إعادة تشغيل المهام ===================
+async def reStartPosting():
+    await sleep(30)
+    for uid, data in users.items():
+        if data.get("posting") and str(uid) not in active_tasks:
+            task = create_task(posting(int(uid)))
+            active_tasks.add(str(uid))
+            task.add_done_callback(lambda t, u=str(uid): active_tasks.discard(u))
+
+@app.on_callback_query(filters.regex(r"^ignore$"))
+async def ignore_callback(_, callback: CallbackQuery):
+    await callback.answer()
+
 async def main():
-    print("🤖 **بوت النشر التلقائي**")
-    print("=" * 40)
-    print(f"✅ البوت يعمل!")
-    print(f"👤 معرف المطور: {OWNER_ID}")
+    create_task(reStartPosting())
+    await app.start()
+    print("✅ البوت يعمل بنجاح!")
     print(f"📊 عدد المستخدمين: {len(users)}")
     print(f"📢 قنوات الاشتراك: {channels}")
-    print("=" * 40)
-    await app.start()
     await idle()
-    print("🛑 تم إيقاف البوت")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop.run_until_complete(main())
